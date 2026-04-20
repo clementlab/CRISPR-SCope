@@ -1,0 +1,24 @@
+name: crisprscope
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - seaborn
+  - anndata
+  - pyarrow
+  - pytest
+  - bowtie2
+  - samtools
+  - crispresso2
+  - dnaio
+  - adjusttext
+  - upsetplot
+  - openjdk
+  - pip:
+      - -e .
