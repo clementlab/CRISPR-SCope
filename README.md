@@ -13,7 +13,7 @@ At a high level, the pipeline:
 
 ## Installation
 
-For collaborators, the recommended setup is the portable conda environment file in this repository:
+For installation, the recommended setup is the portable conda environment file in this repository:
 
 ```bash
 conda env create -f environment.yml
@@ -194,7 +194,7 @@ These parameters control how the `.h5ad` export encodes zygosity calls.
 
 ## Expected Outputs
 
-Given `output_root = results/demo_run`, collaborators should expect outputs such as:
+Given `output_root = results/demo_run`, you should expect outputs such as:
 
 ```text
 results/demo_run.html
@@ -210,7 +210,7 @@ results/demo_run.h5ad
 
 The exact set of plot PDFs, PNGs, and intermediate files depends on settings and on whether intermediate files are retained.
 
-## Notes For Collaborators
+## Additional Notes
 
 - The pipeline requires external command-line tools, especially `bowtie2` and `CRISPResso2`.
 - The main workflow is designed for Linux-like environments such as Linux, WSL, or an HPC cluster.

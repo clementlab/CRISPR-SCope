@@ -1,0 +1,36 @@
+# Example settings file for CRISPRSCope
+
+#r1 reads input fastq 1
+r1      path/to/sample1_L1_r1.fq,path/to/sample1_L2_r1.fq
+
+#r2 reads input fastq 2
+r2      path/to/sample1_L3_r2.fq,path/to_sample1_L4_r2.fq
+
+barcodes        path/to/v2-barcodes.txt
+
+# Amplicon file: amp_name \t amp_seq \t gRNA_seq \t reference_allele_count (optional)
+amplicons       path/to/amplicon_and_guides.txt
+
+output_root     path/to/output/directory/prefix
+
+bowtie2_index   path/to/Bowtie2Index/genome.fa
+
+# Mission Bio Barcode Region information
+#{9bp barcode1} {0-3bp offset} {14bp constant} {9bp barcode2} {15bp constant} {read} is correct. {read} here is the primer and read through
+constant1       GTACGTACGAGTC
+constant2       GTACTCGCAGTAGTC
+
+# Number of processes
+processes       10
+
+
+# Minimum total reads required for a barcode to be considered downstream.
+min_total_reads_per_barcode 10	
+
+# Minimum reads per amplicon per cell for scoring/filtering.
+min_reads_per_amplicon_per_cell 0
+
+
+# Cell quality category to include in analysis
+# High amplicon score and high read depth
+include_high_score_high_depth   True
