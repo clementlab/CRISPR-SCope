@@ -373,7 +373,7 @@ def main():
 		crispresso_dir, output_root, n_processes, keep_intermediate_files, 
 		ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, 
 		min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze,
-		write_h5ad, h5ad_output, h5ad_export_config, settings_file
+		write_h5ad, h5ad_output, h5ad_export_config, raw_final_stage, settings_file
 		) = parse_settings(sys.argv)
 	end_settings = time.time() - start_settings
 	#print(f"Parse Settings: {end_settings}")
@@ -412,7 +412,7 @@ def main():
 	logging.info(f"Filter Amplicon Reads: {end_filter_amplicon}")
 	
 	start_run_crispresso2 = time.time()
-	crispresso_filtered_information = run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles = True)
+	crispresso_filtered_information = run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles = True, raw_final_stage = raw_final_stage)
 	end_run_crispresso2 = time.time() - start_run_crispresso2
 	logging.info(f"Run CRISPResso 2: {end_run_crispresso2}")
 
@@ -1709,6 +1709,10 @@ def parse_settings(args):
 		}
 	}
 
+	raw_final_stage = False
+	if 'raw_final_stage' in settings and settings['raw_final_stage'].strip().lower() == 'true':
+		raw_final_stage = True
+
 	# Generating amplicon output directory if it does not exist
 	amp_file_dir = output_root + ".seq_by_amplicon"
 	if not os.path.isdir(amp_file_dir):
@@ -1733,7 +1737,7 @@ def parse_settings(args):
 		raise Exception('Error: CRISPResso2 is required')
 
 
-	return (r1, r2, constant1, constant2, allow_barcode_mismatches,barcode_file, amplicon_file, primer_lookup_len, adapter_DNA, amp_file_dir, alt_alleles_file, bowtie2_index, crispresso_dir, output_root, n_processes, keep_intermediate_files, ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze, write_h5ad, h5ad_output, h5ad_export_config, settings_file)
+	return (r1, r2, constant1, constant2, allow_barcode_mismatches,barcode_file, amplicon_file, primer_lookup_len, adapter_DNA, amp_file_dir, alt_alleles_file, bowtie2_index, crispresso_dir, output_root, n_processes, keep_intermediate_files, ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze, write_h5ad, h5ad_output, h5ad_export_config, raw_final_stage, settings_file)
 
 
 def write_h5ad_output(output_root, settings_file, h5ad_output=None, h5ad_export_config=None, n_processes=None):
@@ -3094,7 +3098,7 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 
 	return amplicon_names,amplicon_information,info_file
 
-def run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles):
+def run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles, raw_final_stage = None):
 	"""
 	Generate and execute CRISPResso2 commands for each amplicon.
 
@@ -3217,13 +3221,23 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 				# set pass allele_seq file through crispresso
 				allele_dir = os.path.join(output_root + ".seq_by_amplicon")
 				#amp_filename = os.path.join(allele_dir, amplicon_name + "_filtered_allele.fq.gz")
-				amp_filename = build_stage_filename(
-					stage = STAGE_FILTER,
-					tag = "alleles_qc_cells",
-					amplicon = amplicon_name,
-					ext = "fq.gz",
-					output_root = allele_dir
-				)
+				
+				if raw_final_stage:	
+					amp_filename = build_stage_filename(
+						stage = STAGE_SPLIT,
+						tag = "alleles_all_cells",
+						amplicon = amplicon_name,
+						ext = "fq",
+						output_root = allele_dir
+					)
+				else:
+					amp_filename = build_stage_filename(
+						stage = STAGE_FILTER,
+						tag = "alleles_qc_cells",
+						amplicon = amplicon_name,
+						ext = "fq.gz",
+						output_root = allele_dir
+					)
 				#print(f"Got to line 2609\n{amp_filename}")
 
 				if not amp_filename or not os.path.isfile(amp_filename):
