@@ -4096,8 +4096,24 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 			input_ref_allele_counts = amplicon_information[name]['input_ref_allele_counts']
 			folder_finished_file = crispresso_run_folder + ".summ.finished"
 			summ_file = crispresso_run_folder + ".summ"
+			unfiltered_allele_file = build_stage_filename(
+				stage = STAGE_SPLIT,
+				tag = "alleles_all_cells",
+				amplicon = name,
+				ext = "fq",
+				output_root = os.path.join(output_root + ".seq_by_amplicon")
+			)
+			summary_is_valid = is_valid_crispresso_summary_output(summ_file, folder_finished_file)
+			allele_file_is_valid = os.path.isfile(unfiltered_allele_file)
 
-			if not is_valid_crispresso_summary_output(summ_file, folder_finished_file):
+			if summary_is_valid and not allele_file_is_valid:
+				logging.warning(
+					"Re-parsing CRISPResso output for %s because allele FASTQ is missing: %s",
+					name,
+					unfiltered_allele_file,
+				)
+
+			if not summary_is_valid or not allele_file_is_valid:
 				this_args = {'amplicon_name':name,
 							 'amplicon_info_file':amplicon_info_file,
 							 'crispresso_run_folder':crispresso_run_folder,
