@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 from collections import defaultdict
 from datetime import datetime
 import multiprocessing as mp
@@ -356,7 +356,7 @@ def main():
 	---------------
 	1. Parse configuration / command-line arguments.
 	2. Parse raw reads and/or run alignment to produce a name-sorted BAM and
-	   a `reads_per_cell` mapping of barcode → read counts.
+	   a `reads_per_cell` mapping of barcode ? read counts.
 	3. Build primer/amplicon lookup tables and split reads into per-amplicon
 	   FASTQ files (writes an ampliconInfo file to speed re-runs).
 	4. Launch CRISPResso2 runs (one per amplicon), possibly in parallel.
@@ -976,7 +976,7 @@ def generate_upset_plot(output_root, cell_quality_to_analyze):
 	each amplicon is considered "edited" if its corresponding
 	'modPct.<amplicon>' value is greater than zero.
 
-	A boolean edit matrix is constructed (barcode × amplicon),
+	A boolean edit matrix is constructed (barcode � amplicon),
 	and the five most frequent edit combinations (based on exact
 	boolean tuples across amplicons) are identified. The dataset
 	is restricted to these top five combinations, and an UpSet
@@ -1522,6 +1522,8 @@ def parse_settings(args):
 	ch = logging.StreamHandler()
 	ch.setFormatter(log_formatter)
 	logging.getLogger().addHandler(ch)
+	logging.getLogger('matplotlib').setLevel(logging.WARNING)
+	logging.getLogger('fontTools').setLevel(logging.WARNING)
 
 	logging.info('Parsing settings file..')
 
@@ -2968,8 +2970,8 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	unidentified_out1.close()
 	unidentified_out2.close()
 	for amp_name in amp_filehandles:
-	   amp_filehandles[amp_name][0].close()
-	   amp_filehandles[amp_name][1].close()
+		amp_filehandles[amp_name][0].close()
+		amp_filehandles[amp_name][1].close()
 
 	identified_amplicon_file = output_root + ".splitReads.valid_amps.txt"
 	with open(identified_amplicon_file,'w') as fout:
@@ -3467,6 +3469,38 @@ def get_command_output(command):
 			universal_newlines=True,
 			bufsize=-1)#bufsize system default
 	return iter(p.stdout.readline, b'')
+
+def is_valid_crispresso_summary_output(summ_file, finished_file):
+	"""
+	Return True only when the CRISPResso summary marker and summary file
+	exist and the summary file has the expected header plus at least one
+	data row.
+	"""
+	expected_header = "\t".join([
+		'cell',
+		'all_cell_read_count',
+		'all_cell_mut_pct',
+		'all_cell_allele_string',
+		'final_cell_read_count',
+		'final_cell_mut_allele_pct',
+		'final_cell_allele_string',
+		'final_num_refs_covered',
+		'final_cell_allele_mod_string',
+		'final_cell_allele_mod_types_string',
+		'final_cell_allele_readcount_string',
+		'final_ref_read_count_string',
+		'final_ref_mut_allele_fracs_string',
+	]);
+	if not os.path.isfile(finished_file) or not os.path.isfile(summ_file):
+		return False
+	try:
+		with open(summ_file, 'r') as fin:
+			header = fin.readline().strip()
+			first_data_line = fin.readline().strip()
+		return header == expected_header and first_data_line != ""
+	except Exception:
+		return False
+
 
 def parse_one_crispresso_output(this_args):
 	"""
@@ -4050,8 +4084,9 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 			crispresso_out = os.path.join(crispresso_run_folder,'CRISPResso_output.fastq.gz')
 			input_ref_allele_counts = amplicon_information[name]['input_ref_allele_counts']
 			folder_finished_file = crispresso_run_folder + ".summ.finished"
+			summ_file = crispresso_run_folder + ".summ"
 
-			if not os.path.isfile(folder_finished_file):
+			if not is_valid_crispresso_summary_output(summ_file, folder_finished_file):
 				this_args = {'amplicon_name':name,
 							 'amplicon_info_file':amplicon_info_file,
 							 'crispresso_run_folder':crispresso_run_folder,
@@ -4767,7 +4802,7 @@ def amp_per_cell_filtered(parsed_information, output_root, cell_quality_to_analy
 	this function computes, for each barcode:
 
 		- The number of amplicons with totCount >= threshold,
-		  where threshold ∈ [1, 5, 10, 25, 50, 100].
+		  where threshold ? [1, 5, 10, 25, 50, 100].
 
 	It then determines how many barcodes achieve coverage of
 	100%, 90%, 80%, and 50% of total amplicons at each threshold,
@@ -5191,3 +5226,4 @@ body {
 	logger.info('Wrote ' + report_file)
 if __name__ == "__main__":
 	main()
+
