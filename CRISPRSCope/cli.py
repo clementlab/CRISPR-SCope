@@ -2507,6 +2507,17 @@ def alignment_end(pos, cigar):
 
 
 
+def resolve_split_fastq_path(path):
+	if not path or path == 'NA':
+		return None
+	if os.path.isfile(path):
+		return path
+	if not path.endswith('.gz') and os.path.isfile(path + '.gz'):
+		return path + '.gz'
+	return None
+
+
+
 def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_file,primer_lookup_len,amp_file_dir,bowtie2_index,adapter_DNA,n_processes,keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons=False):
 	"""
 	Split reads from a name-sorted aligned BAM into per-amplicon FASTQ files.
@@ -2566,6 +2577,8 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	"""
 	info_file = output_root+".splitReads.ampliconInfo.txt"
 	if os.path.isfile(info_file):
+		cache_is_valid = True
+		missing_amplicon = None
 		with open(info_file,'r') as fin:
 			head = fin.readline().strip()
 			head_els = head.split("\t")
@@ -2595,11 +2608,22 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 				ext="fq",
 				output_root=amp_file_dir,
 			)
+				amp_info['reads_r1_file'] = resolve_split_fastq_path(amp_info.get('reads_r1_file'))
+				amp_info['reads_r2_file'] = resolve_split_fastq_path(amp_info.get('reads_r2_file'))
+				if amp_info['reads_r1_file'] is None or amp_info['reads_r2_file'] is None:
+					cache_is_valid = False
+					missing_amplicon = amp_name
+					break
 				amplicon_information[amp_name] = amp_info
 				amplicon_names.append(amp_name)
 
-		logging.info ("Finished splitting reads")
-		return amplicon_names,amplicon_information,info_file
+		if cache_is_valid:
+			logging.info ("Finished splitting reads")
+			return amplicon_names,amplicon_information,info_file
+		logging.warning(
+			"Ignoring stale split-read info cache because %s is missing paired split FASTQ outputs",
+			missing_amplicon,
+		)
 
 	logging.info("Splitting reads to amplicons..")
 
@@ -3026,25 +3050,12 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	pool.join()
 
 	for amp in amplicon_names:
-		r1_candidate = amplicon_information[amp].get('reads_r1_file')
-		zipped_r1 = r1_candidate
-		if zipped_r1 and not os.path.isfile(zipped_r1) and os.path.isfile(zipped_r1 + '.gz'):
-			zipped_r1 = zipped_r1 + '.gz'
-		if zipped_r1 and os.path.isfile(zipped_r1):
-			#print(f"Writing\t{zipped_r1}")
-			amplicon_information[amp]['reads_r1_file'] = zipped_r1
-		else:
-			#print(f"Line 2446\n{amp}\n{zipped_r1}\nExists?|{os.path.isfile(zipped_r1) if zipped_r1 else False}\n")
-			amplicon_information[amp]['reads_r1_file'] = None
-
-		r2_candidate = amplicon_information[amp].get('reads_r2_file')
-		zipped_r2 = r2_candidate
-		if zipped_r2 and not os.path.isfile(zipped_r2) and os.path.isfile(zipped_r2 + '.gz'):
-			zipped_r2 = zipped_r2 + '.gz'
-		if zipped_r2 and os.path.isfile(zipped_r2):
-			amplicon_information[amp]['reads_r2_file'] = zipped_r2
-		else:
-			amplicon_information[amp]['reads_r2_file'] = None
+		amplicon_information[amp]['reads_r1_file'] = resolve_split_fastq_path(
+			amplicon_information[amp].get('reads_r1_file')
+		)
+		amplicon_information[amp]['reads_r2_file'] = resolve_split_fastq_path(
+			amplicon_information[amp].get('reads_r2_file')
+		)
 
 	log_str = str(tot_reads_count) + " alignment pairs were processed (including multi-mapped and unaligned reads)\n" + \
 			"  Of these, " + str(aln_reads_count) + " read pairs were aligned to the genome\n" + \
@@ -5226,4 +5237,3 @@ body {
 	logger.info('Wrote ' + report_file)
 if __name__ == "__main__":
 	main()
-
