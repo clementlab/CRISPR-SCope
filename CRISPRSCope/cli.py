@@ -356,7 +356,7 @@ def main():
 	---------------
 	1. Parse configuration / command-line arguments.
 	2. Parse raw reads and/or run alignment to produce a name-sorted BAM and
-	   a `reads_per_cell` mapping of barcode ? read counts.
+	   a `reads_per_cell` mapping of barcode → read counts.
 	3. Build primer/amplicon lookup tables and split reads into per-amplicon
 	   FASTQ files (writes an ampliconInfo file to speed re-runs).
 	4. Launch CRISPResso2 runs (one per amplicon), possibly in parallel.
@@ -976,7 +976,7 @@ def generate_upset_plot(output_root, cell_quality_to_analyze):
 	each amplicon is considered "edited" if its corresponding
 	'modPct.<amplicon>' value is greater than zero.
 
-	A boolean edit matrix is constructed (barcode � amplicon),
+	A boolean edit matrix is constructed (barcode × amplicon),
 	and the five most frequent edit combinations (based on exact
 	boolean tuples across amplicons) are identified. The dataset
 	is restricted to these top five combinations, and an UpSet
@@ -1522,8 +1522,6 @@ def parse_settings(args):
 	ch = logging.StreamHandler()
 	ch.setFormatter(log_formatter)
 	logging.getLogger().addHandler(ch)
-	logging.getLogger('matplotlib').setLevel(logging.WARNING)
-	logging.getLogger('fontTools').setLevel(logging.WARNING)
 
 	logging.info('Parsing settings file..')
 
@@ -2505,20 +2503,6 @@ def alignment_end(pos, cigar):
 			ref_len += length
 	return pos + ref_len - 1
 
-def has_amplicon_alignment_indel_or_clip(cigar):
-	return bool(re.search(r'[IDNSHP]', cigar))
-
-
-
-def resolve_split_fastq_path(path):
-	if not path or path == 'NA':
-		return None
-	if os.path.isfile(path):
-		return path
-	if not path.endswith('.gz') and os.path.isfile(path + '.gz'):
-		return path + '.gz'
-	return None
-
 
 
 def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_file,primer_lookup_len,amp_file_dir,bowtie2_index,adapter_DNA,n_processes,keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons=False):
@@ -2580,8 +2564,6 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	"""
 	info_file = output_root+".splitReads.ampliconInfo.txt"
 	if os.path.isfile(info_file):
-		cache_is_valid = True
-		missing_amplicon = None
 		with open(info_file,'r') as fin:
 			head = fin.readline().strip()
 			head_els = head.split("\t")
@@ -2611,22 +2593,11 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 				ext="fq",
 				output_root=amp_file_dir,
 			)
-				amp_info['reads_r1_file'] = resolve_split_fastq_path(amp_info.get('reads_r1_file'))
-				amp_info['reads_r2_file'] = resolve_split_fastq_path(amp_info.get('reads_r2_file'))
-				if amp_info['reads_r1_file'] is None or amp_info['reads_r2_file'] is None:
-					cache_is_valid = False
-					missing_amplicon = amp_name
-					break
 				amplicon_information[amp_name] = amp_info
 				amplicon_names.append(amp_name)
 
-		if cache_is_valid:
-			logging.info ("Finished splitting reads")
-			return amplicon_names,amplicon_information,info_file
-		logging.warning(
-			"Ignoring stale split-read info cache because %s is missing paired split FASTQ outputs",
-			missing_amplicon,
-		)
+		logging.info ("Finished splitting reads")
+		return amplicon_names,amplicon_information,info_file
 
 	logging.info("Splitting reads to amplicons..")
 
@@ -2714,19 +2685,8 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 			line_secondary = int(line_els[1]) & 0x100
 			line_chr = line_els[2]
 			line_start = int(line_els[3]) - 1
-			line_cigar = line_els[5]
 			line_end = line_start + len(line_els[9])
 			if not line_unmapped and not line_secondary:
-				if has_amplicon_alignment_indel_or_clip(line_cigar):
-					logging.warning(
-						"Amplicon %s has unexpected CIGAR %s in reference alignment at %s:%s. "
-						"This pipeline expects amplicon sequences to match the reference without indels or clipping; "
-						"reverse-end read assignment may be less reliable for this amplicon.",
-						amp_name,
-						line_cigar,
-						line_chr,
-						line_start,
-					)
 				amplicon_information[amp_name]['aln_chr'] = line_chr
 				amplicon_information[amp_name]['aln_start'] = str(line_start)
 				amplicon_information[amp_name]['aln_end'] = str(line_end)
@@ -3008,8 +2968,8 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	unidentified_out1.close()
 	unidentified_out2.close()
 	for amp_name in amp_filehandles:
-		amp_filehandles[amp_name][0].close()
-		amp_filehandles[amp_name][1].close()
+	   amp_filehandles[amp_name][0].close()
+	   amp_filehandles[amp_name][1].close()
 
 	identified_amplicon_file = output_root + ".splitReads.valid_amps.txt"
 	with open(identified_amplicon_file,'w') as fout:
@@ -3064,12 +3024,25 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	pool.join()
 
 	for amp in amplicon_names:
-		amplicon_information[amp]['reads_r1_file'] = resolve_split_fastq_path(
-			amplicon_information[amp].get('reads_r1_file')
-		)
-		amplicon_information[amp]['reads_r2_file'] = resolve_split_fastq_path(
-			amplicon_information[amp].get('reads_r2_file')
-		)
+		r1_candidate = amplicon_information[amp].get('reads_r1_file')
+		zipped_r1 = r1_candidate
+		if zipped_r1 and not os.path.isfile(zipped_r1) and os.path.isfile(zipped_r1 + '.gz'):
+			zipped_r1 = zipped_r1 + '.gz'
+		if zipped_r1 and os.path.isfile(zipped_r1):
+			#print(f"Writing\t{zipped_r1}")
+			amplicon_information[amp]['reads_r1_file'] = zipped_r1
+		else:
+			#print(f"Line 2446\n{amp}\n{zipped_r1}\nExists?|{os.path.isfile(zipped_r1) if zipped_r1 else False}\n")
+			amplicon_information[amp]['reads_r1_file'] = None
+
+		r2_candidate = amplicon_information[amp].get('reads_r2_file')
+		zipped_r2 = r2_candidate
+		if zipped_r2 and not os.path.isfile(zipped_r2) and os.path.isfile(zipped_r2 + '.gz'):
+			zipped_r2 = zipped_r2 + '.gz'
+		if zipped_r2 and os.path.isfile(zipped_r2):
+			amplicon_information[amp]['reads_r2_file'] = zipped_r2
+		else:
+			amplicon_information[amp]['reads_r2_file'] = None
 
 	log_str = str(tot_reads_count) + " alignment pairs were processed (including multi-mapped and unaligned reads)\n" + \
 			"  Of these, " + str(aln_reads_count) + " read pairs were aligned to the genome\n" + \
@@ -3238,14 +3211,21 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 			finished_file = os.path.join(crispresso_dir,amplicon_name+".finished")
 			log_file = os.path.join(crispresso_dir,amplicon_name+".log")
 			  
+			#else:
 			if not alleles:
 				amp_filename_r1 = amplicon_information[amplicon_name].get('reads_r1_file')
 				amp_filename_r2 = amplicon_information[amplicon_name].get('reads_r2_file')
 			
 			amplicon_seqs = amplicon_information[amplicon_name]['amp_seqs']
 			guide = amplicon_information[amplicon_name]['guide_seq']
-			has_guide = bool(guide) and guide.lower() not in ("na", "none")
-
+			guide_str = " -g " + guide + " "
+			if guide.lower() == "na" or guide.lower() == "none":
+				guide_str = ""
+			suppress_sub_crispresso_plots_str = ""
+			if suppress_sub_crispresso_plots:
+				suppress_sub_crispresso_plots_str = " --suppress_report --suppress_plots"
+			
+			
 			# Separate crispresso_cmd for alleles and non alleles
 			if alleles:
 				# set pass allele_seq file through crispresso
@@ -3277,7 +3257,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					"-r1", amp_filename,
 					"-a", amplicon_seqs,
 				]
-				if has_guide:
+				if guide != "":
 					crispresso_args.extend(["-g", guide])
 				
 			else:
@@ -3303,7 +3283,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					"-r2", amp_filename_r2,
 					"-a", amplicon_seqs,
 				]
-				if has_guide:
+				if guide != "":
 					crispresso_args.extend(["-g", guide])
 			
 			if suppress_sub_crispresso_plots:
@@ -3487,38 +3467,6 @@ def get_command_output(command):
 			universal_newlines=True,
 			bufsize=-1)#bufsize system default
 	return iter(p.stdout.readline, b'')
-
-def is_valid_crispresso_summary_output(summ_file, finished_file):
-	"""
-	Return True only when the CRISPResso summary marker and summary file
-	exist and the summary file has the expected header plus at least one
-	data row.
-	"""
-	expected_header = "\t".join([
-		'cell',
-		'all_cell_read_count',
-		'all_cell_mut_pct',
-		'all_cell_allele_string',
-		'final_cell_read_count',
-		'final_cell_mut_allele_pct',
-		'final_cell_allele_string',
-		'final_num_refs_covered',
-		'final_cell_allele_mod_string',
-		'final_cell_allele_mod_types_string',
-		'final_cell_allele_readcount_string',
-		'final_ref_read_count_string',
-		'final_ref_mut_allele_fracs_string',
-	]);
-	if not os.path.isfile(finished_file) or not os.path.isfile(summ_file):
-		return False
-	try:
-		with open(summ_file, 'r') as fin:
-			header = fin.readline().strip()
-			first_data_line = fin.readline().strip()
-		return header == expected_header and first_data_line != ""
-	except Exception:
-		return False
-
 
 def parse_one_crispresso_output(this_args):
 	"""
@@ -4102,25 +4050,8 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 			crispresso_out = os.path.join(crispresso_run_folder,'CRISPResso_output.fastq.gz')
 			input_ref_allele_counts = amplicon_information[name]['input_ref_allele_counts']
 			folder_finished_file = crispresso_run_folder + ".summ.finished"
-			summ_file = crispresso_run_folder + ".summ"
-			unfiltered_allele_file = build_stage_filename(
-				stage = STAGE_SPLIT,
-				tag = "alleles_all_cells",
-				amplicon = name,
-				ext = "fq",
-				output_root = os.path.join(output_root + ".seq_by_amplicon")
-			)
-			summary_is_valid = is_valid_crispresso_summary_output(summ_file, folder_finished_file)
-			allele_file_is_valid = os.path.isfile(unfiltered_allele_file)
 
-			if summary_is_valid and not allele_file_is_valid:
-				logging.warning(
-					"Re-parsing CRISPResso output for %s because allele FASTQ is missing: %s",
-					name,
-					unfiltered_allele_file,
-				)
-
-			if not summary_is_valid or not allele_file_is_valid:
+			if not os.path.isfile(folder_finished_file):
 				this_args = {'amplicon_name':name,
 							 'amplicon_info_file':amplicon_info_file,
 							 'crispresso_run_folder':crispresso_run_folder,
@@ -4836,7 +4767,7 @@ def amp_per_cell_filtered(parsed_information, output_root, cell_quality_to_analy
 	this function computes, for each barcode:
 
 		- The number of amplicons with totCount >= threshold,
-		  where threshold ? [1, 5, 10, 25, 50, 100].
+		  where threshold ∈ [1, 5, 10, 25, 50, 100].
 
 	It then determines how many barcodes achieve coverage of
 	100%, 90%, 80%, and 50% of total amplicons at each threshold,
