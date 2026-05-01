@@ -2505,6 +2505,9 @@ def alignment_end(pos, cigar):
 			ref_len += length
 	return pos + ref_len - 1
 
+def has_amplicon_alignment_indel_or_clip(cigar):
+	return bool(re.search(r'[IDNSHP]', cigar))
+
 
 
 def resolve_split_fastq_path(path):
@@ -2711,8 +2714,19 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 			line_secondary = int(line_els[1]) & 0x100
 			line_chr = line_els[2]
 			line_start = int(line_els[3]) - 1
+			line_cigar = line_els[5]
 			line_end = line_start + len(line_els[9])
 			if not line_unmapped and not line_secondary:
+				if has_amplicon_alignment_indel_or_clip(line_cigar):
+					logging.warning(
+						"Amplicon %s has unexpected CIGAR %s in reference alignment at %s:%s. "
+						"This pipeline expects amplicon sequences to match the reference without indels or clipping; "
+						"reverse-end read assignment may be less reliable for this amplicon.",
+						amp_name,
+						line_cigar,
+						line_chr,
+						line_start,
+					)
 				amplicon_information[amp_name]['aln_chr'] = line_chr
 				amplicon_information[amp_name]['aln_start'] = str(line_start)
 				amplicon_information[amp_name]['aln_end'] = str(line_end)
@@ -3224,21 +3238,14 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 			finished_file = os.path.join(crispresso_dir,amplicon_name+".finished")
 			log_file = os.path.join(crispresso_dir,amplicon_name+".log")
 			  
-			#else:
 			if not alleles:
 				amp_filename_r1 = amplicon_information[amplicon_name].get('reads_r1_file')
 				amp_filename_r2 = amplicon_information[amplicon_name].get('reads_r2_file')
 			
 			amplicon_seqs = amplicon_information[amplicon_name]['amp_seqs']
 			guide = amplicon_information[amplicon_name]['guide_seq']
-			guide_str = " -g " + guide + " "
-			if guide.lower() == "na" or guide.lower() == "none":
-				guide_str = ""
-			suppress_sub_crispresso_plots_str = ""
-			if suppress_sub_crispresso_plots:
-				suppress_sub_crispresso_plots_str = " --suppress_report --suppress_plots"
-			
-			
+			has_guide = bool(guide) and guide.lower() not in ("na", "none")
+
 			# Separate crispresso_cmd for alleles and non alleles
 			if alleles:
 				# set pass allele_seq file through crispresso
@@ -3270,7 +3277,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					"-r1", amp_filename,
 					"-a", amplicon_seqs,
 				]
-				if guide != "":
+				if has_guide:
 					crispresso_args.extend(["-g", guide])
 				
 			else:
@@ -3296,7 +3303,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					"-r2", amp_filename_r2,
 					"-a", amplicon_seqs,
 				]
-				if guide != "":
+				if has_guide:
 					crispresso_args.extend(["-g", guide])
 			
 			if suppress_sub_crispresso_plots:
