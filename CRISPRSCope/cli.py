@@ -1522,6 +1522,9 @@ def parse_settings(args):
 	ch = logging.StreamHandler()
 	ch.setFormatter(log_formatter)
 	logging.getLogger().addHandler(ch)
+	logging.getLogger('matplotlib').setLevel(logging.WARNING)
+	logging.getLogger('fontTools').setLevel(logging.WARNING)
+	logging.getLogger('fontTools.subset').setLevel(logging.WARNING)
 
 	logging.info('Parsing settings file..')
 
