@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 from collections import defaultdict
 from datetime import datetime
 import multiprocessing as mp
@@ -9,6 +9,7 @@ import sys
 import signal
 import threading
 import subprocess as sb
+import shlex
 import traceback
 import re
 import errno
@@ -1521,6 +1522,9 @@ def parse_settings(args):
 	ch = logging.StreamHandler()
 	ch.setFormatter(log_formatter)
 	logging.getLogger().addHandler(ch)
+	logging.getLogger('matplotlib').setLevel(logging.WARNING)
+	logging.getLogger('fontTools').setLevel(logging.WARNING)
+	logging.getLogger('fontTools.subset').setLevel(logging.WARNING)
 
 	logging.info('Parsing settings file..')
 
@@ -3165,8 +3169,21 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 				amp_info = dict(zip(head_els,line_els))
 				crispresso_information[line_els[0]] = amp_info
 
-		logging.info ("Finished running CRISPResso on targets")
-		return crispresso_information
+		cache_is_valid = True
+		for amplicon_name, amp_info in crispresso_information.items():
+			if amp_info.get('status') != 'Completed':
+				continue
+			finished_file = amp_info.get('finished_file')
+			crispresso_run_folder = amp_info.get('crispresso_run_folder')
+			crispresso_info_file = os.path.join(crispresso_run_folder, 'CRISPResso2_info.json')
+			if not finished_file or not os.path.isfile(finished_file) or not os.path.isfile(crispresso_info_file):
+				cache_is_valid = False
+				logging.warning("Ignoring stale CRISPResso info cache because %s is missing completion outputs", amplicon_name)
+				break
+		if cache_is_valid:
+			logging.info ("Finished running CRISPResso on targets")
+			return crispresso_information
+		os.remove(info_file)
 
 	crispresso_commands = []
 	crispresso_information = {}
@@ -3238,10 +3255,13 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					not_run_count += 1
 					continue
 				
+				crispresso_args = [
+					"CRISPResso",
+					"-r1", amp_filename,
+					"-a", amplicon_seqs,
+				]
 				if guide != "":
-					crispresso_cmd = "CRISPResso -r1 " + amp_filename + " -a " + amplicon_seqs + " -g " + guide + suppress_sub_crispresso_plots_str + " -o "+crispresso_dir+" -n "+amplicon_name+" -w 2 --fastq_output --no_rerun --force_merge_pairs --exclude_bp_from_left 0 --exclude_bp_from_right 0 &> "+log_file +" && touch "+finished_file
-				else:
-					crispresso_cmd = "CRISPResso -r1 " + amp_filename + " -a " + amplicon_seqs + suppress_sub_crispresso_plots_str + " -o "+crispresso_dir+" -n "+amplicon_name+" -w 2 --fastq_output --no_rerun --force_merge_pairs --exclude_bp_from_left 0 --exclude_bp_from_right 0 &> "+log_file +" && touch "+finished_file    
+					crispresso_args.extend(["-g", guide])
 				
 			else:
 				missing_inputs = []
@@ -3260,21 +3280,48 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					logging.warning(skip_reason)
 					not_run_count += 1
 					continue
+				crispresso_args = [
+					"CRISPResso",
+					"-r1", amp_filename_r1,
+					"-r2", amp_filename_r2,
+					"-a", amplicon_seqs,
+				]
 				if guide != "":
-					crispresso_cmd = "CRISPResso -r1 " + amp_filename_r1 + " -r2 " + amp_filename_r2 + " -a "+amplicon_seqs+" -g "+guide+ suppress_sub_crispresso_plots_str + " -o "+crispresso_dir+" -n "+amplicon_name+" -w 2 --fastq_output --no_rerun --force_merge_pairs --exclude_bp_from_left 0 --exclude_bp_from_right 0 &> "+log_file +" && touch "+finished_file
-				else:
-					crispresso_cmd = "CRISPResso -r1 " + amp_filename_r1 + " -r2 " + amp_filename_r2 + " -a "+amplicon_seqs+ suppress_sub_crispresso_plots_str + " -o "+crispresso_dir+" -n "+amplicon_name+" -w 2 --fastq_output --no_rerun --force_merge_pairs --exclude_bp_from_left 0 --exclude_bp_from_right 0 &> "+log_file +" && touch "+finished_file    
+					crispresso_args.extend(["-g", guide])
 			
+			if suppress_sub_crispresso_plots:
+				crispresso_args.extend(["--suppress_report", "--suppress_plots"])
+			crispresso_args.extend([
+				"-o", crispresso_dir,
+				"-n", amplicon_name,
+				"-w", "2",
+				"--fastq_output",
+				"--no_rerun",
+				"--force_merge_pairs",
+				"--exclude_bp_from_left", "0",
+				"--exclude_bp_from_right", "0",
+			])
+			crispresso_run_folder = os.path.join(crispresso_dir,'CRISPResso_on_'+amplicon_name)
+			crispresso_cmd = shlex.join(crispresso_args) + " > " + shlex.quote(log_file) + " 2>&1 && touch " + shlex.quote(finished_file)
 			crispresso_information[amplicon_name]['crispresso_command'] = crispresso_cmd
 			crispresso_information[amplicon_name]['finished_file'] = finished_file
 			crispresso_information[amplicon_name]['log_file'] = log_file
-			crispresso_information[amplicon_name]['crispresso_run_folder'] = os.path.join(crispresso_dir,'CRISPResso_on_'+amplicon_name)
+			crispresso_information[amplicon_name]['crispresso_run_folder'] = crispresso_run_folder
 			
-			if os.path.isfile(finished_file):
+			crispresso_info_file = os.path.join(crispresso_run_folder, 'CRISPResso2_info.json')
+			if os.path.isfile(finished_file) and os.path.isfile(crispresso_info_file):
 				finished_count += 1
 				continue
 			else:
-				crispresso_commands.append(crispresso_cmd)
+				if os.path.isfile(finished_file) and not os.path.isfile(crispresso_info_file):
+					os.remove(finished_file)
+				crispresso_commands.append({
+					'args': crispresso_args,
+					'command': crispresso_cmd,
+					'log_file': log_file,
+					'finished_file': finished_file,
+					'crispresso_run_folder': crispresso_run_folder,
+				})
 
 
 	logging.info('Skipped CRISPResso analysis for ' + str(not_run_count) + ' amplicons, finished analysis for ' + str(finished_count) + ' amplicons')
@@ -3285,7 +3332,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 		# start processes
 		logging.info("Running on "+ str(n_processes) + " processes..")
 		pool = mp.Pool(n_processes)
-		result = pool.map_async(run_command, crispresso_commands).get(threading.TIMEOUT_MAX)
+		result = pool.map_async(run_crispresso_command, crispresso_commands).get(threading.TIMEOUT_MAX)
 		pool.close()
 		pool.join()
 
@@ -3294,7 +3341,8 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 			pass
 		else:
 			finished_file = crispresso_information[amplicon_name]['finished_file']
-			if os.path.isfile(finished_file):
+			crispresso_info_file = os.path.join(crispresso_information[amplicon_name]['crispresso_run_folder'], 'CRISPResso2_info.json')
+			if os.path.isfile(finished_file) and os.path.isfile(crispresso_info_file):
 				finished_file = crispresso_information[amplicon_name]['finished_file']
 				crispresso_information[amplicon_name]['status'] = 'Completed'
 				crispresso_information[amplicon_name]['crispresso_result'] = 'Completed'
@@ -3307,6 +3355,8 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 						for line in lf:
 							if 'ERROR:' in line:
 								error_message = line.strip()
+				if os.path.isfile(finished_file) and not os.path.isfile(crispresso_info_file):
+					error_message = 'Failed, missing CRISPResso2_info.json after CRISPResso exit; see ' + log_file
 				crispresso_information[amplicon_name]['crispresso_result'] = error_message
 
 
@@ -3325,6 +3375,46 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 			fout.write("\t".join([crispresso_information[amplicon_name][x] for x in header_els])+"\n")
 	return crispresso_information
 
+def run_crispresso_command(job):
+	"""
+	Run one CRISPResso command without a shell and mark it complete only
+	after CRISPResso exits successfully and writes CRISPResso2_info.json.
+	"""
+	args = job['args']
+	command = job['command']
+	log_file = job['log_file']
+	finished_file = job['finished_file']
+	crispresso_run_folder = job['crispresso_run_folder']
+	crispresso_info_file = os.path.join(crispresso_run_folder, 'CRISPResso2_info.json')
+	try:
+		logging.debug('running: ' + command)
+		os.makedirs(os.path.dirname(log_file), exist_ok=True)
+		with open(log_file, 'w') as log_handle:
+			completed = sb.run(args, stdout=log_handle, stderr=sb.STDOUT, shell=False)
+		if completed.returncode == 0 and os.path.isfile(crispresso_info_file):
+			with open(finished_file, 'w'):
+				pass
+			return {'returncode': completed.returncode, 'error': None, 'command': command}
+		if os.path.isfile(finished_file):
+			os.remove(finished_file)
+		error = 'CRISPResso exited with return code %s' % completed.returncode
+		if completed.returncode == 0:
+			error = 'CRISPResso exited successfully but did not write %s' % crispresso_info_file
+		with open(log_file, 'a') as log_handle:
+			log_handle.write('\nERROR: %s\n' % error)
+		logging.error("%s on %s", error, command)
+		return {'returncode': completed.returncode, 'error': error, 'command': command}
+	except Exception as e:
+		if os.path.isfile(finished_file):
+			os.remove(finished_file)
+		try:
+			with open(log_file, 'a') as log_handle:
+				log_handle.write('\nERROR: %s\n' % e)
+		except Exception:
+			pass
+		logging.error("error: %s on %s" % (e, command))
+		return {'returncode': None, 'error': str(e), 'command': command}
+
 def run_command(cmd):
 	"""
 	Execute a shell command using subprocess.
@@ -3336,8 +3426,8 @@ def run_command(cmd):
 
 	Returns
 	-------
-	int or None
-		Return code from subprocess call, or None if execution failed.
+	dict
+		Return code and error message from subprocess call.
 
 	Notes
 	-----
@@ -3349,8 +3439,10 @@ def run_command(cmd):
 	try:
 		logging.debug('running: ' + cmd)
 		return_value = sb.call(cmd,shell=True)
+		return {'returncode': return_value, 'error': None}
 	except Exception as e:
 		logging.error("error: %s on %s" % (e, cmd))
+		return {'returncode': None, 'error': str(e)}
 
 def get_command_output(command):
 	"""
