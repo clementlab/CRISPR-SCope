@@ -4083,15 +4083,25 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 	else:
 		logging.info('Finished parsing CRISPResso folders')
 
-	logging.info('Aggregating ' + str(len(amplicon_names)) + ' target summaries')
-	data = {}
+	usable_amplicon_names = []
 	for amplicon_name in amplicon_names:
 		if crispresso_information[amplicon_name]['status'] != 'Completed':
 			continue
 		crispresso_run_folder = crispresso_information[amplicon_name]['crispresso_run_folder']
 		summ_file = crispresso_run_folder + ".summ"
-		if not os.path.isfile(summ_file):
-			continue
+		if os.path.isfile(summ_file):
+			usable_amplicon_names.append(amplicon_name)
+
+	logging.info(
+		'Aggregating %d target summaries (%d with usable CRISPResso output)' % (
+			len(amplicon_names),
+			len(usable_amplicon_names),
+		)
+	)
+	data = {}
+	for amplicon_name in usable_amplicon_names:
+		crispresso_run_folder = crispresso_information[amplicon_name]['crispresso_run_folder']
+		summ_file = crispresso_run_folder + ".summ"
 		with open (summ_file,'r') as fin:
 			head = fin.readline()
 			for line in fin:
@@ -4122,7 +4132,9 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 		for cell in cells:
 			line = cell
 			for name in amplicon_names:
-				val = "\t0\tNA"
+				val = "\tNA\tNA"
+				if name in usable_amplicon_names:
+					val = "\t0\tNA"
 				if name in data[cell]:
 					val = data[cell][name][0]
 				line += val
@@ -4137,7 +4149,9 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 		for cell in cells:
 			line = cell
 			for name in amplicon_names:
-				val = "\t0\tNA"
+				val = "\tNA\tNA"
+				if name in usable_amplicon_names:
+					val = "\t0\tNA"
 				if name in data[cell]:
 					val = data[cell][name][1]
 				line += val
@@ -4161,7 +4175,9 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 	for cell in cells:
 		vals = []
 		for amplicon in amplicon_names:
-			val = [0, "NA"]
+			val = ["NA", "NA"]
+			if amplicon in usable_amplicon_names:
+				val = [0, "NA"]
 			if amplicon in data[cell]:
 				val = data[cell][amplicon][0].strip().split('\t')
 			val = [x if isinstance(x, int) else int(x) if x.isdigit() else x if x == "NA" else float(x) for x in val]
@@ -4169,8 +4185,8 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 		summary_df.loc[cell] = vals
 	
 	
-	# Filter to totCols
-	totCols = summary_df.filter(like = "totCount")
+	usable_tot_cols = ["totCount.%s" % name for name in usable_amplicon_names]
+	totCols = summary_df[usable_tot_cols].apply(pd.to_numeric, errors = 'coerce') if usable_tot_cols else pd.DataFrame(index = summary_df.index)
 	
 	# Check if Amplicon Score File Exists
 	amp_score_file = output_root + ".amplicon_score.txt"
@@ -4196,7 +4212,9 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 				continue
 			line = cell
 			for name in amplicon_names:
-				val = "\t0\tNA"
+				val = "\tNA\tNA"
+				if name in usable_amplicon_names:
+					val = "\t0\tNA"
 				if name in data[cell]:
 					val = data[cell][name][0]
 				line += val
@@ -4213,7 +4231,9 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 				continue
 			line = cell
 			for name in amplicon_names:
-				val = "\t0\tNA"
+				val = "\tNA\tNA"
+				if name in usable_amplicon_names:
+					val = "\t0\tNA"
 				if name in data[cell]:
 					val = data[cell][name][1]
 				line += val
@@ -4322,6 +4342,9 @@ def generate_amplicon_score(raw_tot_columns, min_reads_per_amplicon_per_cell, mi
 	"""
 	percentile_cutoffs = [0.975, 0.99, 0.999, 0.9999]
 	constant_values = [1, 10, 50, 100]
+
+	if raw_tot_columns.empty or raw_tot_columns.shape[1] == 0:
+		return pd.DataFrame(columns = ['Amplicon Score', 'Read Count', 'Barcode Rank', 'Color'])
 	
 	# Filter to cells with 'min_reads_per_amplicon_per_cell' or more reads for all amplicons
 	mask = (raw_tot_columns >= min_reads_per_amplicon_per_cell).all(axis = 1)
