@@ -32,6 +32,80 @@ A simple import sanity check is:
 python -c "import CRISPRSCope; print(CRISPRSCope.__version__)"
 ```
 
+## Docker (WSL-first)
+
+CRISPRSCope can also be run from a Linux container built from this repository. This image contains only the program and its runtime dependencies. User inputs such as `settings.txt`, FASTQs, barcode files, amplicon files, Bowtie2 indexes, and output directories are **not** baked into the image.
+
+### Prerequisites
+
+- Docker Desktop installed on Windows
+- WSL integration enabled for the Ubuntu distro where this repository lives
+- this repository stored in the WSL filesystem, for example:
+
+```bash
+/home/sammibulin/Projects/CRISPR-SCope
+```
+
+Build and run the image from a WSL shell, not from PowerShell.
+
+### Build The Image
+
+From the repository root in WSL:
+
+```bash
+docker build -t crisprscope:latest .
+```
+
+Tag published images explicitly when reproducibility matters so collaborators can run the same known-good image instead of rebuilding later.
+
+### Run The Container
+
+The recommended workflow is to keep your `settings.txt` and all referenced input files together in a host project directory, then mount that directory into the container at `/work`.
+
+Example host project layout:
+
+```text
+my_run/
+|- settings.txt
+|- inputs/
+|- references/
+`- results/
+```
+
+From WSL:
+
+```bash
+cd /path/to/my_run
+docker run --rm \
+  -v "$PWD":/work \
+  -w /work \
+  crisprscope:latest \
+  settings.txt
+```
+
+This works because the container entrypoint resolves `CRISPRSCope` directly, so the runtime argument can stay as the settings file path.
+
+### Path Expectations
+
+For the cleanest container workflow, prefer **relative paths** inside `settings.txt`, for example:
+
+```tsv
+r1	inputs/sample_R1.fastq.gz
+r2	inputs/sample_R2.fastq.gz
+barcodes	inputs/barcodes.txt
+amplicons	inputs/amplicons.tsv
+bowtie2_index	references/hg38/hg38
+output_root	results/demo_run
+```
+
+When the project directory is mounted to `/work` and the container runs with `-w /work`, those relative paths resolve correctly inside the container and outputs are written back to the host-mounted directory.
+
+### Notes
+
+- Host users do not need Conda, Python, Bowtie2, Samtools, Java, or CRISPResso2 installed outside the container.
+- This first-pass image is designed to be Linux-first and WSL-first.
+- The same image structure should also be compatible with later Docker-to-Apptainer workflows on HPC systems, though this repository currently documents Docker usage only.
+
 ## Running The Pipeline
 
 CRISPRSCope expects a tab-delimited settings file as its main input:
