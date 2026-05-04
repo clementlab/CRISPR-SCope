@@ -374,7 +374,7 @@ def main():
 		crispresso_dir, output_root, n_processes, keep_intermediate_files, 
 		ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, 
 		min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze,
-		write_h5ad, h5ad_output, h5ad_export_config, settings_file
+		write_h5ad, h5ad_output, h5ad_export_config, debug_rescued_reads_bam, settings_file
 		) = parse_settings(sys.argv)
 	end_settings = time.time() - start_settings
 	#print(f"Parse Settings: {end_settings}")
@@ -388,7 +388,7 @@ def main():
 
 
 	start_split_reads = time.time()
-	amplicon_names, amplicon_information, amplicon_info_file = split_reads_by_amplicon(aligned_bam, output_root, amplicon_file, alt_alleles_file, primer_lookup_len, amp_file_dir, bowtie2_index, adapter_DNA, n_processes, keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons)
+	amplicon_names, amplicon_information, amplicon_info_file = split_reads_by_amplicon(aligned_bam, output_root, amplicon_file, alt_alleles_file, primer_lookup_len, amp_file_dir, bowtie2_index, adapter_DNA, n_processes, keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons, debug_rescued_reads_bam)
 	end_split_reads = time.time() - start_split_reads
 	logging.info(f"Split Reads by Amplicon: {end_split_reads}")
 	
@@ -1475,6 +1475,7 @@ def parse_settings(args):
 			write_h5ad : bool,
 			h5ad_output : str,
 			h5ad_export_config : dict,
+			debug_rescued_reads_bam : str,
 			settings_file : str
 		)
 
@@ -1698,6 +1699,14 @@ def parse_settings(args):
 	if 'h5ad_output' in settings:
 		h5ad_output = settings['h5ad_output']
 
+	debug_rescued_reads_bam = ""
+	if 'debug_rescued_reads_bam' in settings:
+		debug_rescued_reads_bam = settings['debug_rescued_reads_bam'].strip()
+		if debug_rescued_reads_bam.lower() in ("true", "yes", "1"):
+			debug_rescued_reads_bam = output_root + ".splitReads.rescued.bam"
+		elif debug_rescued_reads_bam.lower() in ("false", "no", "0", "none"):
+			debug_rescued_reads_bam = ""
+
 	h5ad_zygosity = {}
 	for key, default in H5AD_ZYGOSITY_DEFAULTS.items():
 		settings_key = f"h5ad_{key}"
@@ -1737,7 +1746,7 @@ def parse_settings(args):
 		raise Exception('Error: CRISPResso2 is required')
 
 
-	return (r1, r2, constant1, constant2, allow_barcode_mismatches,barcode_file, amplicon_file, primer_lookup_len, adapter_DNA, amp_file_dir, alt_alleles_file, bowtie2_index, crispresso_dir, output_root, n_processes, keep_intermediate_files, ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze, write_h5ad, h5ad_output, h5ad_export_config, settings_file)
+	return (r1, r2, constant1, constant2, allow_barcode_mismatches,barcode_file, amplicon_file, primer_lookup_len, adapter_DNA, amp_file_dir, alt_alleles_file, bowtie2_index, crispresso_dir, output_root, n_processes, keep_intermediate_files, ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze, write_h5ad, h5ad_output, h5ad_export_config, debug_rescued_reads_bam, settings_file)
 
 
 def write_h5ad_output(output_root, settings_file, h5ad_output=None, h5ad_export_config=None, n_processes=None):
@@ -2507,8 +2516,52 @@ def alignment_end(pos, cigar):
 	return pos + ref_len - 1
 
 
+def _open_rescued_reads_writer(aligned_bam, rescued_reads_path):
+	"""
+	Open a SAM/BAM writer for read pairs accepted by partial alignment rescue.
+	"""
+	if not rescued_reads_path:
+		return (None, None)
 
-def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_file,primer_lookup_len,amp_file_dir,bowtie2_index,adapter_DNA,n_processes,keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons=False):
+	safe_write_path(rescued_reads_path)
+	header = sb.check_output(
+		["samtools", "view", "-H", aligned_bam],
+		universal_newlines=True,
+	)
+
+	if rescued_reads_path.lower().endswith(".sam"):
+		writer = open(rescued_reads_path, "w")
+		writer.write(header)
+		return (writer, None)
+
+	proc = sb.Popen(
+		["samtools", "view", "-b", "-h", "-o", rescued_reads_path, "-"],
+		stdin=sb.PIPE,
+		universal_newlines=True,
+	)
+	proc.stdin.write(header)
+	return (proc.stdin, proc)
+
+
+def _close_rescued_reads_writer(writer, proc, rescued_reads_path):
+	"""
+	Close the rescued-read SAM/BAM writer and verify samtools completed.
+	"""
+	if writer is None:
+		return
+
+	writer.close()
+	if proc is not None:
+		return_code = proc.wait()
+		if return_code != 0:
+			raise Exception(
+				"samtools failed while writing rescued read BAM "
+				+ rescued_reads_path
+			)
+
+
+
+def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_file,primer_lookup_len,amp_file_dir,bowtie2_index,adapter_DNA,n_processes,keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons=False, debug_rescued_reads_bam=""):
 	"""
 	Split reads from a name-sorted aligned BAM into per-amplicon FASTQ files.
 
@@ -2551,6 +2604,9 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	assign_reads_to_all_possible_amplicons : bool
 		If True, assign a read to every amplicon it plausibly matches;
 		otherwise pick a single best amplicon.
+	debug_rescued_reads_bam : str
+		Optional path to write read pairs accepted by partial alignment rescue.
+		Use a .sam suffix for SAM output; any other suffix writes BAM.
 
 	Returns
 	-------
@@ -2745,6 +2801,9 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	partial_alignment_rescue_count = 0 # primers agreed and one alignment-side check supported the amplicon with no contradiction
 	unmapped_reads_count = 0 #unmapped by bowtie
 	bam_iter = get_command_output('samtools view %s'%(aligned_bam))#read in the aligned bam file
+	rescued_reads_writer, rescued_reads_proc = _open_rescued_reads_writer(aligned_bam, debug_rescued_reads_bam)
+	if debug_rescued_reads_bam:
+		logging.info("Writing partial-alignment rescued reads to " + debug_rescued_reads_bam)
 	count = 0
 
 	# set to keep track of failed cells
@@ -2916,6 +2975,9 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 					accepted_amplicon = amp1
 					if len(alignment_calls) < 2:
 						partial_alignment_rescue_count += 1
+						if rescued_reads_writer is not None:
+							rescued_reads_writer.write(line1)
+							rescued_reads_writer.write(line2)
 
 			if accepted_amplicon is not None:
 				if accepted_amplicon not in amp_filehandles:
@@ -2970,9 +3032,10 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 
 	unidentified_out1.close()
 	unidentified_out2.close()
+	_close_rescued_reads_writer(rescued_reads_writer, rescued_reads_proc, debug_rescued_reads_bam)
 	for amp_name in amp_filehandles:
-	   amp_filehandles[amp_name][0].close()
-	   amp_filehandles[amp_name][1].close()
+		amp_filehandles[amp_name][0].close()
+		amp_filehandles[amp_name][1].close()
 
 	identified_amplicon_file = output_root + ".splitReads.valid_amps.txt"
 	with open(identified_amplicon_file,'w') as fout:
