@@ -48,6 +48,20 @@ CELL_QUALITY_CODES = {
 }
 
 
+def _numeric_tot_count_columns(df):
+	"""
+	Return total-count columns coerced to numeric values.
+	"""
+	return df.filter(like = "totCount").apply(pd.to_numeric, errors = "coerce")
+
+
+def _numeric_mod_pct_columns(df):
+	"""
+	Return modification-percentage columns coerced to numeric values.
+	"""
+	return df.filter(like = "modPct").apply(pd.to_numeric, errors = "coerce")
+
+
 # Pipeline stage numbering
 STAGE_PARSE = 1
 STAGE_ALIGN = 2
@@ -611,7 +625,7 @@ def generate_amplicon_coverage_plot(output_root, cell_quality_to_analyze):
 
 
 	editing = editing[editing.index.isin(valid_barcodes)]
-	editingSummary_count = editing.filter(like = "totCount")
+	editingSummary_count = _numeric_tot_count_columns(editing)
 	
 	amplicon_column_sum = editingSummary_count.sum(axis = 0) / len(editingSummary_count)
 	amplicon_column_sum_sorted = amplicon_column_sum.sort_values(ascending = False)
@@ -730,8 +744,8 @@ def generate_read_depth_boxplots(output_root, cell_quality_to_analyze):
 	high_barcodes = classified_barcodes[classified_barcodes['Color'].isin(high_colors)].index
 	low_barcodes = classified_barcodes[classified_barcodes['Color'].isin(low_colors)].index
 
-	high_totals = editing[editing.index.isin(high_barcodes)].filter(like="totCount").sum(axis=1)
-	low_totals = editing[editing.index.isin(low_barcodes)].filter(like="totCount").sum(axis=1)
+	high_totals = _numeric_tot_count_columns(editing[editing.index.isin(high_barcodes)]).sum(axis=1)
+	low_totals = _numeric_tot_count_columns(editing[editing.index.isin(low_barcodes)]).sum(axis=1)
 
 	plot_df = pd.concat([
 		pd.DataFrame({"Read Count": high_totals, "Barcode Quality": "High"}),
@@ -833,8 +847,8 @@ def generate_cell_coverage_plot(output_root, cell_quality_to_analyze):
 	high_barcodes = classified_barcodes[classified_barcodes['Color'].isin(high_colors)].index
 	low_barcodes = classified_barcodes[classified_barcodes['Color'].isin(low_colors)].index
 
-	high_qual_edit = editing[editing.index.isin(high_barcodes)].filter(like="totCount")
-	low_qual_edit = editing[editing.index.isin(low_barcodes)].filter(like="totCount")
+	high_qual_edit = _numeric_tot_count_columns(editing[editing.index.isin(high_barcodes)])
+	low_qual_edit = _numeric_tot_count_columns(editing[editing.index.isin(low_barcodes)])
 	
 	# Calculate read count average in high quality barcodes
 	high_qual_sum = high_qual_edit.sum(axis = 1)
@@ -934,7 +948,7 @@ def generate_edit_histogram(output_root, cell_quality_to_analyze):
 	barcodes = amplicon[amplicon['Color'].isin(cell_quality_to_analyze)].index.tolist()
 	editing = editing[editing.index.isin(barcodes)]
 		
-	editing = editing.filter(like = "modPct")
+	editing = _numeric_mod_pct_columns(editing)
 	
 	editing = editing > 0
 	
@@ -1037,7 +1051,7 @@ def generate_upset_plot(output_root, cell_quality_to_analyze):
 	#high_qual = amplicon[amplicon['Color'].isin(cell_quality_to_analyze)]
  
 	# Reduce to modified columns
-	editing = editing.filter(like = "modPct") 
+	editing = _numeric_mod_pct_columns(editing) 
 	editing.columns = editing.columns.str.replace('modPct.', '')
 	editing.fillna(0,inplace=True)
 	
@@ -1054,13 +1068,14 @@ def generate_upset_plot(output_root, cell_quality_to_analyze):
 	# Remove columns where all modification values == False
 	editing = editing.loc[:, ~(editing == False).all()] 
 	
-	first = True
-	for col in editing.columns:
-		if first:
-			editing = editing.set_index(editing[col] > 0)
-			first = False
-		else:
-			editing = editing.set_index(editing[col] > 0, append = True)
+	if editing.shape[1] == 0:
+		logging.warning("Skipping edit combination upset plot because no edited sites were found")
+		return None
+	if editing.shape[1] == 1:
+		logging.warning("Skipping edit combination upset plot because only one edited site was found")
+		return None
+
+	editing.index = pd.MultiIndex.from_frame(editing.astype(bool))
 	
 	upset = UpSet(editing, orientation = "horizontal", sort_by = "cardinality", show_counts = True)
 	
@@ -4681,7 +4696,7 @@ def log_log_plot(parsed_information, output_root, cell_quality_to_analyze, filte
 	
 	colors = [COLOR_DISPLAY_MAP[color] for color in colors]
 	
-	totCols = parsed_information.filter(like = "totCount")
+	totCols = _numeric_tot_count_columns(parsed_information)
 	rowsum_data = {"Barcode": totCols.index,
 			"Read Count": totCols.sum(axis = 1)}
 
@@ -4803,11 +4818,11 @@ def cell_per_amp_filtered(parsed_information, output_root, cell_quality_to_analy
 	#parsed_information = parsed_information[parsed_information['Color'].isin(["High Score / High Reads", "High Score / Low Reads"])]
 
 	# Grab total count columns
-	totCols = parsed_information.filter(like = "totCount")
+	totCols = _numeric_tot_count_columns(parsed_information)
 
 	# Get counts of cells with different read cutoffs
 	read_cutoffs = [1, 5, 10, 25, 50, 100]
-	counts = {f'{c} reads': (parsed_information[totCols.columns] >= c).sum() for c in read_cutoffs}
+	counts = {f'{c} reads': (totCols >= c).sum() for c in read_cutoffs}
 
 	# Create a DataFrame with counts
 	tots = pd.DataFrame(counts).T
@@ -4901,28 +4916,29 @@ def amp_per_cell_filtered(parsed_information, output_root, cell_quality_to_analy
 
 	read_cutoffs = [1,5,10,25,50,100]
 	# Grab total count columns
-	cov_cols = [col for col in parsed_information.columns if col.startswith("totCount")]
+	totCols = _numeric_tot_count_columns(parsed_information)
+	cov_cols = list(totCols.columns)
 	# Row sum of cells with amplicon coverage at specified cutoffs
-	g1 = (parsed_information[cov_cols] >= 1).sum(axis=1) 
-	g5 = (parsed_information[cov_cols] >= 5).sum(axis=1)
-	g10 = (parsed_information[cov_cols] >= 10).sum(axis=1)
-	g25 = (parsed_information[cov_cols] >= 25).sum(axis=1)
-	g50 = (parsed_information[cov_cols] >= 50).sum(axis=1)
-	g100 = (parsed_information[cov_cols] >= 100).sum(axis=1)
+	g1 = (totCols >= 1).sum(axis=1) 
+	g5 = (totCols >= 5).sum(axis=1)
+	g10 = (totCols >= 10).sum(axis=1)
+	g25 = (totCols >= 25).sum(axis=1)
+	g50 = (totCols >= 50).sum(axis=1)
+	g100 = (totCols >= 100).sum(axis=1)
 
 	# Determine number of amplicons for 90%, 80%, and 50% coverage of target amplicons
 	cov_100pct = len(cov_cols)
 	cov_90pct = round(len(cov_cols) * 0.9)
 	cov_80pct = round(len(cov_cols) * 0.8)
 	cov_50pct = round(len(cov_cols) * 0.5)
-	break_vals = [cov_100pct, cov_90pct, cov_80pct, cov_50pct]
+	break_vals = list(dict.fromkeys([cov_100pct, cov_90pct, cov_80pct, cov_50pct]))
 
-	vals1 = [len(g1[g1 > cov_100pct]), len(g1[g1 > cov_90pct]), len(g1[g1 > cov_80pct]), len(g1[g1 > cov_50pct])]
-	vals5 = [len(g5[g5 > cov_100pct]), len(g5[g5 > cov_90pct]), len(g5[g5 > cov_80pct]), len(g5[g5 > cov_50pct])]
-	vals10 = [len(g10[g10 > cov_100pct]), len(g10[g10 > cov_90pct]), len(g10[g10 > cov_80pct]), len(g10[g10 > cov_50pct])]
-	vals25 = [len(g25[g25 > cov_100pct]), len(g25[g25 > cov_90pct]), len(g25[g25 > cov_80pct]), len(g25[g25 > cov_50pct])]
-	vals50 = [len(g50[g50 > cov_100pct]), len(g50[g50 > cov_90pct]), len(g50[g50 > cov_80pct]), len(g50[g50 > cov_50pct])]
-	vals100 = [len(g100[g100 > cov_100pct]), len(g100[g100 > cov_90pct]), len(g100[g100 > cov_80pct]), len(g100[g100 > cov_50pct])]
+	vals1 = [len(g1[g1 > val]) for val in break_vals]
+	vals5 = [len(g5[g5 > val]) for val in break_vals]
+	vals10 = [len(g10[g10 > val]) for val in break_vals]
+	vals25 = [len(g25[g25 > val]) for val in break_vals]
+	vals50 = [len(g50[g50 > val]) for val in break_vals]
+	vals100 = [len(g100[g100 > val]) for val in break_vals]
 
 	# Create DataFrame structure
 	tots = pd.DataFrame([vals1, vals5, vals10, vals25, vals50, vals100], 
@@ -5033,14 +5049,21 @@ def mod_per_amp_filtered(parsed_information, output_root, cell_quality_to_analyz
 	PerMod_df = pd.DataFrame(columns=['Read_cutoff', 'Mod_average', 'Target', 'Color'])        
 		
 	for color in colors:
+		color_rows = parsed_information[parsed_information['Color'] == color]
+		totCols = _numeric_tot_count_columns(color_rows)
+		modCols = _numeric_mod_pct_columns(color_rows)
+		mod_cols_by_target = {}
+		for mod_col in modCols.columns:
+			target = mod_col.replace('modPct.', '', 1).replace('modPct_', '', 1)
+			mod_cols_by_target[target] = mod_col
 		for cutoff in read_cutoffs:
-			totCols = parsed_information[parsed_information['Color'] == color].filter(like = 'totCount')
-			modCols = parsed_information[parsed_information['Color'] == color].filter(like = 'modPct')
-			for i in range(0, totCols.shape[1]):
-				totCol = totCols.iloc[:, i]
-				modCol = modCols.iloc[:, i]
+			for tot_col in totCols.columns:
+				totCol = totCols[tot_col]
+				col_title = tot_col.replace('totCount.', '', 1).replace('totCount_', '', 1)
+				if col_title not in mod_cols_by_target:
+					continue
+				modCol = modCols[mod_cols_by_target[col_title]]
 				modAvg = modCol[totCol >= cutoff].mean()
-				col_title = totCol.name.replace('totCount.', '')
 				PerMod_df.loc[len(PerMod_df)] = [cutoff, modAvg, col_title, color]
 				
 	# Create a combined average df for ordering in the plot
