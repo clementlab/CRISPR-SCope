@@ -34,6 +34,7 @@ from CRISPRSCope import __version__
 # Constants and default settings
 MIN_TOTAL_READS_PER_BARCODE_DEFAULT = 10
 MIN_READS_PER_AMPLICON_PER_CELL_DEFAULT = 0
+PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT = 30.0
 H5AD_ZYGOSITY_DEFAULTS = {
 	"wt_max_mod_pct": 20.0,
 	"het_max_mod_pct": 80.0,
@@ -389,7 +390,8 @@ def main():
 		ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, 
 		min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze,
 		write_h5ad, h5ad_output, h5ad_export_config, debug_rescued_reads_bam,
-		debug_require_strict_amplicon_alignment, settings_file
+		debug_rejected_rescue_reads_bam, debug_require_strict_amplicon_alignment,
+		partial_rescue_min_mean_read_quality, settings_file
 		) = parse_settings(sys.argv)
 	end_settings = time.time() - start_settings
 	#print(f"Parse Settings: {end_settings}")
@@ -403,7 +405,7 @@ def main():
 
 
 	start_split_reads = time.time()
-	amplicon_names, amplicon_information, amplicon_info_file = split_reads_by_amplicon(aligned_bam, output_root, amplicon_file, alt_alleles_file, primer_lookup_len, amp_file_dir, bowtie2_index, adapter_DNA, n_processes, keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons, debug_rescued_reads_bam, debug_require_strict_amplicon_alignment)
+	amplicon_names, amplicon_information, amplicon_info_file = split_reads_by_amplicon(aligned_bam, output_root, amplicon_file, alt_alleles_file, primer_lookup_len, amp_file_dir, bowtie2_index, adapter_DNA, n_processes, keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons, debug_rescued_reads_bam, debug_require_strict_amplicon_alignment, debug_rejected_rescue_reads_bam, partial_rescue_min_mean_read_quality)
 	end_split_reads = time.time() - start_split_reads
 	logging.info(f"Split Reads by Amplicon: {end_split_reads}")
 	
@@ -1043,13 +1045,9 @@ def generate_upset_plot(output_root, cell_quality_to_analyze):
 	amplicon = pd.read_csv(output_root + ".amplicon_score.txt", sep = "\t", index_col = 0)
 	
 	# Filter barcodes if required 
-	#if filtered:
-	#    barcodes = amplicon[amplicon['Color'].isin(["High Score / High Reads", "High Score / Low Reads"])].index.tolist()
-	#    editing = editing[editing.index.isin(barcodes)]
 	barcodes = amplicon[amplicon['Color'].isin(cell_quality_to_analyze)].index.tolist()
 	editing = editing[editing.index.isin(barcodes)]
 	
-	#high_qual = amplicon[amplicon['Color'].isin(cell_quality_to_analyze)]
  
 	# Reduce to modified columns
 	editing = _numeric_mod_pct_columns(editing) 
@@ -1492,7 +1490,9 @@ def parse_settings(args):
 			h5ad_output : str,
 			h5ad_export_config : dict,
 			debug_rescued_reads_bam : str,
+			debug_rejected_rescue_reads_bam : str,
 			debug_require_strict_amplicon_alignment : bool,
+			partial_rescue_min_mean_read_quality : float,
 			settings_file : str
 		)
 
@@ -1730,6 +1730,24 @@ def parse_settings(args):
 		elif debug_rescued_reads_bam.lower() in ("false", "no", "0", "none"):
 			debug_rescued_reads_bam = ""
 
+	debug_rejected_rescue_reads_bam = ""
+	if 'debug_rejected_rescue_reads_bam' in settings:
+		debug_rejected_rescue_reads_bam = settings['debug_rejected_rescue_reads_bam'].strip()
+		if debug_rejected_rescue_reads_bam.lower() in ("true", "yes", "1"):
+			debug_rejected_rescue_reads_bam = output_root + ".splitReads.rejected_rescue_candidates.bam"
+		elif debug_rejected_rescue_reads_bam.lower() in ("false", "no", "0", "none"):
+			debug_rejected_rescue_reads_bam = ""
+
+	try:
+		partial_rescue_min_mean_read_quality = float(settings.get(
+			'partial_rescue_min_mean_read_quality',
+			PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT,
+		))
+		if partial_rescue_min_mean_read_quality < 0:
+			raise ValueError("partial_rescue_min_mean_read_quality must be >= 0")
+	except Exception as e:
+		raise ValueError(f"Invalid partial_rescue_min_mean_read_quality: {e}")
+
 	h5ad_zygosity = {}
 	for key, default in H5AD_ZYGOSITY_DEFAULTS.items():
 		settings_key = f"h5ad_{key}"
@@ -1769,7 +1787,7 @@ def parse_settings(args):
 		raise Exception('Error: CRISPResso2 is required')
 
 
-	return (r1, r2, constant1, constant2, allow_barcode_mismatches,barcode_file, amplicon_file, primer_lookup_len, adapter_DNA, amp_file_dir, alt_alleles_file, bowtie2_index, crispresso_dir, output_root, n_processes, keep_intermediate_files, ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze, write_h5ad, h5ad_output, h5ad_export_config, debug_rescued_reads_bam, debug_require_strict_amplicon_alignment, settings_file)
+	return (r1, r2, constant1, constant2, allow_barcode_mismatches,barcode_file, amplicon_file, primer_lookup_len, adapter_DNA, amp_file_dir, alt_alleles_file, bowtie2_index, crispresso_dir, output_root, n_processes, keep_intermediate_files, ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze, write_h5ad, h5ad_output, h5ad_export_config, debug_rescued_reads_bam, debug_rejected_rescue_reads_bam, debug_require_strict_amplicon_alignment, partial_rescue_min_mean_read_quality, settings_file)
 
 
 def write_h5ad_output(output_root, settings_file, h5ad_output=None, h5ad_export_config=None, n_processes=None):
@@ -2531,12 +2549,52 @@ def parse_and_align_reads(r1_fastqs,r2_fastqs,constant1,constant2,
 
 
 def alignment_end(pos, cigar):
+	if cigar == "*" or cigar is None:
+		return pos
 	ref_len = 0
 	for length, op in re.findall(r'(\d+)([MIDNSHP=X])', cigar):
 		length = int(length)
 		if op in ('M', 'D', 'N', '=', 'X'):
 			ref_len += length
 	return pos + ref_len - 1
+
+
+def mean_phred_quality(qual_string):
+	"""
+	Return the mean Phred+33 base quality for one SAM quality string.
+	"""
+	if qual_string is None:
+		return None
+	qual_string = qual_string.strip()
+	if qual_string == "" or qual_string == "*":
+		return None
+	return sum(ord(ch) - 33 for ch in qual_string) / len(qual_string)
+
+
+def alignment_boundary_key(read_chr, read_start0, cigar, is_reverse):
+	"""
+	Return the inward-facing amplicon-boundary key supported by an alignment.
+
+	Forward-strand reads support the amplicon start boundary. Reverse-strand
+	reads support the amplicon end boundary. Outward-facing boundary hits are
+	therefore ignored by construction.
+	"""
+	if read_chr in (None, "", "*") or cigar in (None, "*") or read_start0 is None:
+		return None
+	read_pos = alignment_end(read_start0, cigar) if is_reverse else read_start0
+	return read_chr + ":" + str(read_pos)
+
+
+def inward_alignment_amplicon(read_chr, read_start0, cigar, is_reverse, start_lookup, end_lookup):
+	"""
+	Call an amplicon from an inward-facing alignment boundary, or NA.
+	"""
+	key = alignment_boundary_key(read_chr, read_start0, cigar, is_reverse)
+	if key is None:
+		return "NA"
+	if is_reverse:
+		return end_lookup.get(key, "NA")
+	return start_lookup.get(key, "NA")
 
 
 def _open_rescued_reads_writer(aligned_bam, rescued_reads_path):
@@ -2583,37 +2641,76 @@ def _close_rescued_reads_writer(writer, proc, rescued_reads_path):
 			)
 
 
-def _classify_amplicon_assignment(amp1, amp2, amp1_aln, amp2_aln, require_strict_amplicon_alignment=False):
+def _quality_is_below_threshold(mean_quality, min_mean_quality):
+	if mean_quality is None:
+		return False
+	try:
+		if np.isnan(mean_quality):
+			return False
+	except TypeError:
+		pass
+	return mean_quality < min_mean_quality
+
+
+def _classify_amplicon_assignment(
+	amp1,
+	amp2,
+	amp1_aln,
+	amp2_aln,
+	require_strict_amplicon_alignment=False,
+	r1_mean_quality=None,
+	r2_mean_quality=None,
+	partial_rescue_min_mean_read_quality=PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT,
+):
 	"""
 	Classify one read-pair amplicon assignment from primer and alignment calls.
 	"""
-	current_rescue_amplicon = None
-	current_rescue_used = False
-	if amp1 == amp2 and amp1 != "NA":
-		alignment_calls = [x for x in (amp1_aln, amp2_aln) if x != "NA"]
-		if alignment_calls and all(x == amp1 for x in alignment_calls):
-			current_rescue_amplicon = amp1
-			current_rescue_used = len(alignment_calls) < 2
+	result = {
+		"accepted_amplicon": None,
+		"rescued_by_partial_alignment": False,
+		"would_rescue_under_strict": False,
+		"reject_reason": None,
+	}
+
+	if amp1 != amp2 or amp1 == "NA":
+		result["reject_reason"] = "primer_disagreement_or_missing"
+		return result
+
+	alignment_calls = [x for x in (amp1_aln, amp2_aln) if x != "NA"]
+	if any(x != amp1 for x in alignment_calls):
+		result["reject_reason"] = "contradictory_alignment"
+		return result
+
+	if not alignment_calls:
+		result["reject_reason"] = "no_inward_boundary_support"
+		return result
+
+	current_rescue_used = len(alignment_calls) < 2
+	if current_rescue_used and partial_rescue_min_mean_read_quality is not None:
+		if (
+			_quality_is_below_threshold(r1_mean_quality, partial_rescue_min_mean_read_quality)
+			or _quality_is_below_threshold(r2_mean_quality, partial_rescue_min_mean_read_quality)
+		):
+			result["reject_reason"] = "low_mean_quality"
+			return result
 
 	if require_strict_amplicon_alignment:
 		strict_amplicon = None
 		if amp1 == amp2 == amp1_aln == amp2_aln and amp1 != "NA":
 			strict_amplicon = amp1
-		return {
-			"accepted_amplicon": strict_amplicon,
-			"rescued_by_partial_alignment": False,
-			"would_rescue_under_strict": current_rescue_used and strict_amplicon is None,
-		}
+		result["accepted_amplicon"] = strict_amplicon
+		result["would_rescue_under_strict"] = current_rescue_used and strict_amplicon is None
+		if strict_amplicon is None:
+			result["reject_reason"] = "strict_alignment_required"
+		return result
 
-	return {
-		"accepted_amplicon": current_rescue_amplicon,
-		"rescued_by_partial_alignment": current_rescue_used,
-		"would_rescue_under_strict": False,
-	}
+	result["accepted_amplicon"] = amp1
+	result["rescued_by_partial_alignment"] = current_rescue_used
+	return result
 
 
 
-def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_file,primer_lookup_len,amp_file_dir,bowtie2_index,adapter_DNA,n_processes,keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons=False, debug_rescued_reads_bam="", debug_require_strict_amplicon_alignment=False):
+def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_file,primer_lookup_len,amp_file_dir,bowtie2_index,adapter_DNA,n_processes,keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons=False, debug_rescued_reads_bam="", debug_require_strict_amplicon_alignment=False, debug_rejected_rescue_reads_bam="", partial_rescue_min_mean_read_quality=PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT):
 	"""
 	Split reads from a name-sorted aligned BAM into per-amplicon FASTQ files.
 
@@ -2621,7 +2718,8 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	----------------
 	- Build primer lookup tables and optionally align amplicons to the genome.
 	- Iterate through the name-sorted BAM and assign each read pair to one or
-	  more amplicons based on primer matches and alignment position.
+	  more amplicons based on primer matches and inward-facing amplicon-boundary
+	  alignment support.
 	- Write per-amplicon R1/R2 FASTQ files and an amplicon info file used to
 	  accelerate re-runs.
 	- Uses `reads_per_cell` (barcode -> read count) as input for optional filtering
@@ -2662,6 +2760,13 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	debug_require_strict_amplicon_alignment : bool
 		If True, disable partial-alignment rescue and require both primer calls
 		and both alignment-side calls to agree on the same amplicon.
+	debug_rejected_rescue_reads_bam : str
+		Optional path to write primer-agreeing rescue candidates rejected by the
+		quality gate, contradictory alignment evidence, or missing inward
+		boundary support.
+	partial_rescue_min_mean_read_quality : float
+		Minimum mean Phred quality required for each mate in partial rescues.
+		Fully alignment-supported assignments are not gated by this setting.
 
 	Returns
 	-------
@@ -2858,11 +2963,17 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	aligned_other_loc_reads_count = 0 # reads that have primers for an amplicon but are aligned to another location
 	partial_alignment_rescue_count = 0 # primers agreed and one alignment-side check supported the amplicon with no contradiction
 	would_rescue_strict_alignment_count = 0 # strict debug mode only: reads rejected that current rescue would have accepted
+	rejected_rescue_low_quality_count = 0
+	rejected_rescue_contradictory_alignment_count = 0
+	rejected_rescue_no_inward_boundary_support_count = 0
 	unmapped_reads_count = 0 #unmapped by bowtie
 	bam_iter = get_command_output('samtools view %s'%(aligned_bam))#read in the aligned bam file
 	rescued_reads_writer, rescued_reads_proc = _open_rescued_reads_writer(aligned_bam, debug_rescued_reads_bam)
 	if debug_rescued_reads_bam:
 		logging.info("Writing partial-alignment rescued reads to " + debug_rescued_reads_bam)
+	rejected_rescue_reads_writer, rejected_rescue_reads_proc = _open_rescued_reads_writer(aligned_bam, debug_rejected_rescue_reads_bam)
+	if debug_rejected_rescue_reads_bam:
+		logging.info("Writing rejected rescue candidate reads to " + debug_rejected_rescue_reads_bam)
 	count = 0
 
 	# set to keep track of failed cells
@@ -2933,18 +3044,14 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 			
 		seq1_to_write = seq1
 		primer1 = seq1[0:primer_lookup_len]
-		key1 = line1_chr + ":" + str(line1_start)
 		if line1_rc:
 			primer1 = seq1[(-1*primer_lookup_len):]
-			key1 = line1_chr + ":" + str(alignment_end(line1_start, line1_cigar))
 			seq1_to_write = reverse_complement(seq1)
 
 		seq2_to_write = seq2
 		primer2 = seq2[0:primer_lookup_len]
-		key2 = line2_chr + ":" + str(line2_start)
 		if line2_rc:
 			primer2 = seq2[(-1*primer_lookup_len):]#after alignment, all reads are put on the forward strand so we don't need to reverse complement them
-			key2 = line2_chr + ":" + str(alignment_end(line2_start, line2_cigar))
 			seq2_to_write = reverse_complement(seq2)
 
 
@@ -2954,12 +3061,22 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 			amp1 = primer_seqs[primer1]
 		if primer2 in primer_seqs:
 			amp2 = primer_seqs[primer2]
-		amp1_aln = "NA"
-		amp2_aln = "NA"
-		if key1 in start_amplicon_locs: # start_amplicon_locs[ChrN:10000000] = amp_name
-			amp1_aln = start_amplicon_locs[key1]
-		if key2 in end_amplicon_locs:
-			amp2_aln = end_amplicon_locs[key2]
+		amp1_aln = inward_alignment_amplicon(
+			line1_chr,
+			line1_start,
+			line1_cigar,
+			bool(line1_rc),
+			start_amplicon_locs,
+			end_amplicon_locs,
+		)
+		amp2_aln = inward_alignment_amplicon(
+			line2_chr,
+			line2_start,
+			line2_cigar,
+			bool(line2_rc),
+			start_amplicon_locs,
+			end_amplicon_locs,
+		)
 
 		amp_same_key = ""
 		if assign_reads_to_all_possible_amplicons: # write all possible amplicons where this read could match - from the primer matching or the alignment
@@ -3033,8 +3150,12 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 				amp1_aln,
 				amp2_aln,
 				require_strict_amplicon_alignment = debug_require_strict_amplicon_alignment,
+				r1_mean_quality = mean_phred_quality(qual1),
+				r2_mean_quality = mean_phred_quality(qual2),
+				partial_rescue_min_mean_read_quality = partial_rescue_min_mean_read_quality,
 			)
 			accepted_amplicon = assignment["accepted_amplicon"]
+			reject_reason = assignment["reject_reason"]
 			if assignment["rescued_by_partial_alignment"]:
 				partial_alignment_rescue_count += 1
 				if rescued_reads_writer is not None:
@@ -3042,6 +3163,16 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 					rescued_reads_writer.write(line2)
 			if assignment["would_rescue_under_strict"]:
 				would_rescue_strict_alignment_count += 1
+			if reject_reason == "low_mean_quality":
+				rejected_rescue_low_quality_count += 1
+			elif reject_reason == "contradictory_alignment":
+				rejected_rescue_contradictory_alignment_count += 1
+			elif reject_reason == "no_inward_boundary_support":
+				rejected_rescue_no_inward_boundary_support_count += 1
+			if reject_reason in ("low_mean_quality", "contradictory_alignment", "no_inward_boundary_support"):
+				if rejected_rescue_reads_writer is not None:
+					rejected_rescue_reads_writer.write(line1)
+					rejected_rescue_reads_writer.write(line2)
 
 			if accepted_amplicon is not None:
 				if accepted_amplicon not in amp_filehandles:
@@ -3097,6 +3228,7 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	unidentified_out1.close()
 	unidentified_out2.close()
 	_close_rescued_reads_writer(rescued_reads_writer, rescued_reads_proc, debug_rescued_reads_bam)
+	_close_rescued_reads_writer(rejected_rescue_reads_writer, rejected_rescue_reads_proc, debug_rejected_rescue_reads_bam)
 	for amp_name in amp_filehandles:
 		amp_filehandles[amp_name][0].close()
 		amp_filehandles[amp_name][1].close()
@@ -3177,11 +3309,16 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 		if debug_require_strict_amplicon_alignment:
 			rescue_log_line = "      " + str(would_rescue_strict_alignment_count) + " read pairs would have been rescued by partial-alignment rescue but were excluded by strict alignment mode\n"
 		else:
-			rescue_log_line = "      " + str(partial_alignment_rescue_count) + " read pairs were rescued because both primer calls agreed and one alignment-side check supported the amplicon without contradiction\n"
+			rescue_log_line = "      " + str(partial_alignment_rescue_count) + " read pairs were rescued because both primer calls agreed and one inward-facing alignment boundary supported the amplicon without contradiction\n"
+		rejected_rescue_log_line = \
+				"      " + str(rejected_rescue_low_quality_count) + " rescue candidate read pairs were rejected due to low mean read quality\n" + \
+				"      " + str(rejected_rescue_contradictory_alignment_count) + " rescue candidate read pairs were rejected due to contradictory alignment evidence\n" + \
+				"      " + str(rejected_rescue_no_inward_boundary_support_count) + " rescue candidate read pairs had primer agreement but no inward-facing boundary support\n"
 		log_str = str(tot_reads_count) + " alignment pairs were processed (including multi-mapped and unaligned reads)\n" + \
 				"  Of these, " + str(aln_reads_count) + " read pairs were aligned to the genome\n" + \
 				"    Of these, " + str(id_reads_count) + " read pairs were aligned correctly and identified\n" + \
 				rescue_log_line + \
+				rejected_rescue_log_line + \
 				"    Of the unaligned reads, \n" + \
 			"      " + str(chimeric_reads_count) + " read pairs were chimeric (contained primer sequences from different amplicons) \n" + \
 			"      " + str(aligned_other_loc_reads_count) + " read pairs aligned to a different genomic location than the amplicon location \n" + \

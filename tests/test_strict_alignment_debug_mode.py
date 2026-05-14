@@ -42,11 +42,19 @@ def _parse_settings_for_test(tmp_path, monkeypatch, extra_lines=None):
 
 
 def test_amplicon_assignment_normal_mode_rescues_partial_alignment():
-	assignment = cli._classify_amplicon_assignment("ampA", "ampA", "ampA", "NA")
+	assignment = cli._classify_amplicon_assignment(
+		"ampA",
+		"ampA",
+		"ampA",
+		"NA",
+		r1_mean_quality=30.0,
+		r2_mean_quality=30.0,
+	)
 
 	assert assignment["accepted_amplicon"] == "ampA"
 	assert assignment["rescued_by_partial_alignment"] is True
 	assert assignment["would_rescue_under_strict"] is False
+	assert assignment["reject_reason"] is None
 
 
 def test_amplicon_assignment_strict_mode_rejects_and_counts_would_rescue():
@@ -56,11 +64,14 @@ def test_amplicon_assignment_strict_mode_rejects_and_counts_would_rescue():
 		"ampA",
 		"NA",
 		require_strict_amplicon_alignment=True,
+		r1_mean_quality=30.0,
+		r2_mean_quality=30.0,
 	)
 
 	assert assignment["accepted_amplicon"] is None
 	assert assignment["rescued_by_partial_alignment"] is False
 	assert assignment["would_rescue_under_strict"] is True
+	assert assignment["reject_reason"] == "strict_alignment_required"
 
 
 def test_amplicon_assignment_strict_mode_requires_both_alignment_calls():
@@ -75,6 +86,7 @@ def test_amplicon_assignment_strict_mode_requires_both_alignment_calls():
 	assert assignment["accepted_amplicon"] == "ampA"
 	assert assignment["rescued_by_partial_alignment"] is False
 	assert assignment["would_rescue_under_strict"] is False
+	assert assignment["reject_reason"] is None
 
 
 @pytest.mark.parametrize(
@@ -93,10 +105,129 @@ def test_amplicon_assignment_rejects_invalid_or_contradictory_calls(amp1, amp2, 
 	assert assignment["would_rescue_under_strict"] is False
 
 
+def test_inward_boundary_allows_r2_forward_read_at_amplicon_start():
+	start_lookup = {"chr1:100": "ampA"}
+	end_lookup = {"chr1:199": "ampA"}
+
+	assignment = cli._classify_amplicon_assignment(
+		"ampA",
+		"ampA",
+		"NA",
+		cli.inward_alignment_amplicon("chr1", 100, "100M", False, start_lookup, end_lookup),
+		r1_mean_quality=30.0,
+		r2_mean_quality=30.0,
+	)
+
+	assert assignment["accepted_amplicon"] == "ampA"
+	assert assignment["rescued_by_partial_alignment"] is True
+
+
+def test_inward_boundary_allows_r1_reverse_read_at_amplicon_end():
+	start_lookup = {"chr1:100": "ampA"}
+	end_lookup = {"chr1:199": "ampA"}
+
+	assignment = cli._classify_amplicon_assignment(
+		"ampA",
+		"ampA",
+		cli.inward_alignment_amplicon("chr1", 100, "100M", True, start_lookup, end_lookup),
+		"NA",
+		r1_mean_quality=30.0,
+		r2_mean_quality=30.0,
+	)
+
+	assert assignment["accepted_amplicon"] == "ampA"
+	assert assignment["rescued_by_partial_alignment"] is True
+
+
+def test_inward_boundary_rejects_forward_read_at_amplicon_end():
+	start_lookup = {"chr1:100": "ampA"}
+	end_lookup = {"chr1:199": "ampA"}
+
+	assignment = cli._classify_amplicon_assignment(
+		"ampA",
+		"ampA",
+		cli.inward_alignment_amplicon("chr1", 199, "100M", False, start_lookup, end_lookup),
+		"NA",
+		r1_mean_quality=30.0,
+		r2_mean_quality=30.0,
+	)
+
+	assert assignment["accepted_amplicon"] is None
+	assert assignment["reject_reason"] == "no_inward_boundary_support"
+
+
+def test_inward_boundary_rejects_reverse_read_at_amplicon_start():
+	start_lookup = {"chr1:100": "ampA"}
+	end_lookup = {"chr1:199": "ampA"}
+
+	assignment = cli._classify_amplicon_assignment(
+		"ampA",
+		"ampA",
+		cli.inward_alignment_amplicon("chr1", 1, "100M", True, start_lookup, end_lookup),
+		"NA",
+		r1_mean_quality=30.0,
+		r2_mean_quality=30.0,
+	)
+
+	assert assignment["accepted_amplicon"] is None
+	assert assignment["reject_reason"] == "no_inward_boundary_support"
+
+
+def test_partial_rescue_accepts_when_both_mates_q30_or_higher():
+	assignment = cli._classify_amplicon_assignment(
+		"ampA",
+		"ampA",
+		"ampA",
+		"NA",
+		r1_mean_quality=30.0,
+		r2_mean_quality=35.0,
+	)
+
+	assert assignment["accepted_amplicon"] == "ampA"
+	assert assignment["rescued_by_partial_alignment"] is True
+
+
+@pytest.mark.parametrize("r1_quality,r2_quality", [(29.9, 35.0), (35.0, 29.9)])
+def test_partial_rescue_rejects_when_either_mate_below_q30(r1_quality, r2_quality):
+	assignment = cli._classify_amplicon_assignment(
+		"ampA",
+		"ampA",
+		"ampA",
+		"NA",
+		r1_mean_quality=r1_quality,
+		r2_mean_quality=r2_quality,
+	)
+
+	assert assignment["accepted_amplicon"] is None
+	assert assignment["rescued_by_partial_alignment"] is False
+	assert assignment["reject_reason"] == "low_mean_quality"
+
+
+def test_full_alignment_assignment_is_not_quality_gated():
+	assignment = cli._classify_amplicon_assignment(
+		"ampA",
+		"ampA",
+		"ampA",
+		"ampA",
+		r1_mean_quality=10.0,
+		r2_mean_quality=10.0,
+	)
+
+	assert assignment["accepted_amplicon"] == "ampA"
+	assert assignment["rescued_by_partial_alignment"] is False
+
+
+def test_mean_phred_quality():
+	assert cli.mean_phred_quality("??") == 30.0
+	assert cli.mean_phred_quality("*") is None
+
+
 def test_parse_settings_strict_alignment_debug_mode_defaults_false(tmp_path, monkeypatch):
 	result = _parse_settings_for_test(tmp_path, monkeypatch)
 
-	assert result[-2] is False
+	assert result[-3] is False
+	assert result[-2] == cli.PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT
+	assert result[-4] == ""
 
 
 def test_parse_settings_strict_alignment_debug_mode_parses_true(tmp_path, monkeypatch):
@@ -106,7 +237,27 @@ def test_parse_settings_strict_alignment_debug_mode_parses_true(tmp_path, monkey
 		extra_lines=["debug_require_strict_amplicon_alignment\ttrue"],
 	)
 
-	assert result[-2] is True
+	assert result[-3] is True
+
+
+def test_parse_settings_rescue_quality_threshold_parses_float(tmp_path, monkeypatch):
+	result = _parse_settings_for_test(
+		tmp_path,
+		monkeypatch,
+		extra_lines=["partial_rescue_min_mean_read_quality\t28.5"],
+	)
+
+	assert result[-2] == 28.5
+
+
+def test_parse_settings_rejected_rescue_bam_true_uses_output_root(tmp_path, monkeypatch):
+	result = _parse_settings_for_test(
+		tmp_path,
+		monkeypatch,
+		extra_lines=["debug_rejected_rescue_reads_bam\ttrue"],
+	)
+
+	assert result[-4].endswith("run.splitReads.rejected_rescue_candidates.bam")
 
 
 def test_parse_settings_rejects_strict_alignment_with_assign_all(tmp_path, monkeypatch):
