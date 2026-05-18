@@ -56,7 +56,7 @@ def test_file_based_edit_plots_treat_missing_mod_pct_as_unedited(tmp_path, monke
 	output_root = str(tmp_path / "run")
 	parsed_information = _parsed_information_with_missing_amplicon()
 	parsed_information.index.name = "cell"
-	parsed_information.drop(columns=["Color"]).to_csv(output_root + ".editingSummary.txt", sep="\t")
+	parsed_information.drop(columns=["Color"]).to_csv(output_root + ".filteredEditingSummary.txt", sep="\t")
 
 	amplicon_score = pd.DataFrame(
 		{"Color": ["HQ_HI", "HQ_LO"]},

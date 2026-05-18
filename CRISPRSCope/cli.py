@@ -434,6 +434,17 @@ def main():
 	end_run_crispresso2 = time.time() - start_run_crispresso2
 	logging.info(f"Run CRISPResso 2: {end_run_crispresso2}")
 
+	start_filtered_summary = time.time()
+	filtered_parsed_information = write_filtered_editing_summary_from_filtered_crispresso(
+		amplicon_names=amplicon_names,
+		crispresso_information=crispresso_information,
+		crispresso_filtered_information=crispresso_filtered_information,
+		output_root=output_root,
+		ignore_substitutions=ignore_substitutions,
+	)
+	end_filtered_summary = time.time() - start_filtered_summary
+	logging.info(f"Write Filtered Editing Summary: {end_filtered_summary}")
+
 	filtered_summary_plot_objects = []
 
 	filtered_read_count_plot_obj = generate_read_depth_boxplots(output_root, cell_quality_to_analyze)
@@ -466,17 +477,17 @@ def main():
 		filtered_summary_plot_objects.append(filtered_log_log_plot_obj)
 
 	#
-	filtered_cell_per_amp_obj = cell_per_amp_filtered(parsed_information, output_root, cell_quality_to_analyze)
+	filtered_cell_per_amp_obj = cell_per_amp_filtered(filtered_parsed_information, output_root, cell_quality_to_analyze)
 	if filtered_cell_per_amp_obj is not None:
 		filtered_summary_plot_objects.append(filtered_cell_per_amp_obj)
 
 	#
-	filtered_amp_per_cell_obj = amp_per_cell_filtered(parsed_information, output_root, cell_quality_to_analyze)
+	filtered_amp_per_cell_obj = amp_per_cell_filtered(filtered_parsed_information, output_root, cell_quality_to_analyze)
 	if filtered_amp_per_cell_obj is not None:
 		filtered_summary_plot_objects.append(filtered_amp_per_cell_obj)
 
 	#
-	filtered_mod_pct_plot_obj = mod_per_amp_filtered(parsed_information, output_root, cell_quality_to_analyze)
+	filtered_mod_pct_plot_obj = mod_per_amp_filtered(filtered_parsed_information, output_root, cell_quality_to_analyze)
 	if filtered_mod_pct_plot_obj is not None:
 		filtered_summary_plot_objects.append(filtered_mod_pct_plot_obj)
 
@@ -943,8 +954,8 @@ def generate_edit_histogram(output_root, cell_quality_to_analyze):
 	"""
 	plt.clf()
 	plt.cla()
-	# Read in editingSummary file
-	editing = pd.read_csv(output_root + ".editingSummary.txt", sep = "\t", index_col = 0) 
+	# Read in the final filtered editingSummary file
+	editing = pd.read_csv(output_root + ".filteredEditingSummary.txt", sep = "\t", index_col = 0)
 	# Read in amplicon score file
 	amplicon = pd.read_csv(output_root + ".amplicon_score.txt", sep = "\t", index_col = 0)
 	
@@ -979,7 +990,7 @@ def generate_edit_histogram(output_root, cell_quality_to_analyze):
 			plot_title = 'Editing Count Histogram',
 			plot_label = 'A histogram that displays the number of edited sites in each barcode.',
 			plot_datas = [
-				("Modification Percentages (modPct)", output_root + ".editingSummary.txt"),
+				("Filtered modification percentages (modPct)", output_root + ".filteredEditingSummary.txt"),
 				("Filtered cell barcodes", output_root + ".amplicon_score.txt")
 				]
 			)
@@ -1039,8 +1050,8 @@ def generate_upset_plot(output_root, cell_quality_to_analyze):
 	"""
 	plt.clf()
 	plt.cla() 
-	# Read in editingSummary file
-	editing = pd.read_csv(output_root + ".editingSummary.txt", sep = "\t", index_col = 0) 
+	# Read in the final filtered editingSummary file
+	editing = pd.read_csv(output_root + ".filteredEditingSummary.txt", sep = "\t", index_col = 0)
 	# Read in amplicon score file
 	amplicon = pd.read_csv(output_root + ".amplicon_score.txt", sep = "\t", index_col = 0)
 	
@@ -1097,7 +1108,7 @@ def generate_upset_plot(output_root, cell_quality_to_analyze):
 			plot_title = 'Editing Sites and Intersections',
 			plot_label = 'An upset plot that displays the most common edits and edit combinations.',
 			plot_datas = [
-				("Modification Percentages (modPct)", output_root + ".editingSummary.txt"),
+				("Filtered modification percentages (modPct)", output_root + ".filteredEditingSummary.txt"),
 				("Filtered cell barcodes", output_root + ".amplicon_score.txt"),
 				]
 			)
@@ -4466,9 +4477,7 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 		amp_score.to_csv(amp_score_file, sep = "\t")
 		end_amplicon_score_time = time.time() - amplicon_score_time
 		logging.info("Generated amplicon score in %.2f seconds"%(end_amplicon_score_time))
-	
-	# writing out a filtered editingSummary file
-	# this removes cells filtered out within generate_amplicon_score
+
 	with open(output_root+".filteredEditingSummaryPseudobulk.txt",'w') as fout:
 		header = "cell"
 		for name in amplicon_names:
@@ -4488,31 +4497,184 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 				line += val
 			fout.write(line+"\n")
 
-	with open(output_root+".filteredEditingSummary.txt",'w') as fout:
+	summary_df = add_color_information(summary_df, amp_score)
+
+	return summary_df
+
+
+def _crispresso_annotation_is_modified(annotation_line, ignore_substitutions=False):
+	"""
+	Classify one CRISPResso output FASTQ annotation line as modified/unmodified.
+	"""
+	if "ALN=NA" in annotation_line:
+		return None
+	field_values = {}
+	for field in ("DEL", "INS", "SUB"):
+		match = re.search(r"(?:^|\s)" + field + r"=([^\s]*)", annotation_line)
+		if match is None:
+			field_values[field] = None
+		else:
+			field_values[field] = match.group(1)
+	if field_values["DEL"] is None or field_values["INS"] is None:
+		return None
+	if not ignore_substitutions and field_values["SUB"] is None:
+		return None
+	mod_fields = ["DEL", "INS"]
+	if not ignore_substitutions:
+		mod_fields.append("SUB")
+	return any(field_values[field] not in (None, "") for field in mod_fields)
+
+
+def _load_final_allele_read_support(summ_file):
+	"""
+	Read first-pass per-cell final allele read support from a .summ file.
+	"""
+	read_support = defaultdict(dict)
+	if not summ_file or not os.path.isfile(summ_file):
+		return read_support
+	with open(summ_file, "r") as fin:
+		header = fin.readline().strip().split("\t")
+		header_idx = {name: idx for idx, name in enumerate(header)}
+		if "cell" not in header_idx or "final_cell_allele_readcount_string" not in header_idx:
+			return read_support
+		for line in fin:
+			line_els = line.rstrip("\n").split("\t")
+			if len(line_els) <= header_idx["final_cell_allele_readcount_string"]:
+				continue
+			cell = line_els[header_idx["cell"]]
+			readcount_string = line_els[header_idx["final_cell_allele_readcount_string"]]
+			if readcount_string in ("", "NA"):
+				continue
+			for allele_idx, read_count in enumerate(readcount_string.split(","), start=1):
+				try:
+					read_support[cell][allele_idx] = int(read_count)
+				except ValueError:
+					read_support[cell][allele_idx] = 0
+	return read_support
+
+
+def _parse_filtered_crispresso_allele_output(crispresso_output_fastq, read_support, valid_barcodes, ignore_substitutions=False):
+	"""
+	Aggregate filtered CRISPResso allele classifications by barcode.
+	"""
+	results = defaultdict(lambda: {"support": 0, "modified": 0, "total": 0})
+	if not crispresso_output_fastq or not os.path.isfile(crispresso_output_fastq):
+		return results
+
+	with gzip.open(crispresso_output_fastq, "rt") as fin:
+		while True:
+			header = fin.readline()
+			if not header:
+				break
+			sequence = fin.readline()
+			annotation = fin.readline()
+			quality = fin.readline()
+			if not quality:
+				break
+
+			header_token = header.strip().split(" ")[0]
+			if header_token.startswith("@"):
+				header_token = header_token[1:]
+			header_els = header_token.split(":")
+			if len(header_els) < 3:
+				continue
+			barcode = header_els[-2]
+			try:
+				allele_idx = int(header_els[-1])
+			except ValueError:
+				continue
+			if barcode not in valid_barcodes:
+				continue
+
+			is_modified = _crispresso_annotation_is_modified(annotation, ignore_substitutions=ignore_substitutions)
+			if is_modified is None:
+				continue
+
+			results[barcode]["total"] += 1
+			if is_modified:
+				results[barcode]["modified"] += 1
+			results[barcode]["support"] += read_support.get(barcode, {}).get(allele_idx, 0)
+	return results
+
+
+def _write_filtered_summary_table(path, amplicon_names, cells, usable_amplicon_names, filtered_data):
+	"""
+	Write a filtered editing summary table with CRISPResso-derived genotype calls.
+	"""
+	with open(path, "w") as fout:
 		header = "cell"
 		for name in amplicon_names:
-			header += "\ttotCount.%s\tmodPct.%s"%(name,name)
-		fout.write(header+"\n")
+			header += "\ttotCount.%s\tmodPct.%s" % (name, name)
+		fout.write(header + "\n")
 
 		for cell in cells:
-			if cell not in amp_score.index:
-				continue
 			line = cell
 			for name in amplicon_names:
 				val = "\tNA\tNA"
 				if name in usable_amplicon_names:
 					val = "\t0\tNA"
-				if name in data[cell]:
-					val = data[cell][name][1]
+				if cell in filtered_data and name in filtered_data[cell]:
+					this_data = filtered_data[cell][name]
+					if this_data["total"] > 0:
+						mod_pct = round(100 * this_data["modified"] / float(this_data["total"]), 2)
+						val = "\t%s\t%s" % (this_data["support"], mod_pct)
 				line += val
-			fout.write(line+"\n")
-
-	logging.info("Finished reading and compiling summaries for %d filtered cells"%len(amp_score))
+			fout.write(line + "\n")
 
 
-	summary_df = add_color_information(summary_df, amp_score)
-	 
-	return summary_df
+def write_filtered_editing_summary_from_filtered_crispresso(
+	amplicon_names,
+	crispresso_information,
+	crispresso_filtered_information,
+	output_root,
+	ignore_substitutions=False,
+):
+	"""
+	Write filteredEditingSummary from filtered CRISPResso allele classifications.
+	"""
+	amp_score_file = output_root + ".amplicon_score.txt"
+	if not os.path.isfile(amp_score_file):
+		raise FileNotFoundError("Amplicon score file does not exist: " + amp_score_file)
+	amp_score = pd.read_csv(amp_score_file, sep="\t", index_col=0)
+	cells = list(amp_score.index)
+	valid_barcodes = set(cells)
+
+	filtered_data = defaultdict(dict)
+	usable_amplicon_names = []
+	for amplicon_name in amplicon_names:
+		filtered_info = crispresso_filtered_information.get(amplicon_name, {})
+		if filtered_info.get("status") != "Completed":
+			continue
+		crispresso_run_folder = filtered_info.get("crispresso_run_folder")
+		crispresso_output_fastq = os.path.join(crispresso_run_folder, "CRISPResso_output.fastq.gz") if crispresso_run_folder else None
+		if not crispresso_output_fastq or not os.path.isfile(crispresso_output_fastq):
+			continue
+
+		usable_amplicon_names.append(amplicon_name)
+		first_pass_info = crispresso_information.get(amplicon_name, {})
+		first_pass_folder = first_pass_info.get("crispresso_run_folder")
+		first_pass_summ = first_pass_folder + ".summ" if first_pass_folder else None
+		read_support = _load_final_allele_read_support(first_pass_summ)
+		amplicon_calls = _parse_filtered_crispresso_allele_output(
+			crispresso_output_fastq,
+			read_support,
+			valid_barcodes,
+			ignore_substitutions=ignore_substitutions,
+		)
+		for cell, call_data in amplicon_calls.items():
+			filtered_data[cell][amplicon_name] = call_data
+
+	_write_filtered_summary_table(
+		output_root + ".filteredEditingSummary.txt",
+		amplicon_names,
+		cells,
+		set(usable_amplicon_names),
+		filtered_data,
+	)
+	logging.info("Finished writing filtered editing summary for %d filtered cells", len(cells))
+
+	filtered_summary = pd.read_csv(output_root + ".filteredEditingSummary.txt", sep="\t", index_col=0)
+	return add_color_information(filtered_summary, amp_score)
 
 
 def stratify_data(input_data):
