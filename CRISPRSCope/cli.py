@@ -4772,9 +4772,19 @@ def generate_amplicon_score(raw_tot_columns, min_reads_per_amplicon_per_cell, mi
 	"""
 	percentile_cutoffs = [0.975, 0.99, 0.999, 0.9999]
 	constant_values = [1, 10, 50, 100]
+	output_columns = ['Amplicon Score', 'Read Count', 'Barcode Rank', 'Color']
 
 	if raw_tot_columns.empty or raw_tot_columns.shape[1] == 0:
-		return pd.DataFrame(columns = ['Amplicon Score', 'Read Count', 'Barcode Rank', 'Color'])
+		return pd.DataFrame(columns = output_columns)
+
+	if raw_tot_columns.columns.duplicated().any():
+		dup_cols = raw_tot_columns.columns[raw_tot_columns.columns.duplicated(keep = False)].unique()
+		raise ValueError(f"Duplicate amplicon names detected: {list(dup_cols)}")
+
+	raw_tot_columns = raw_tot_columns.apply(pd.to_numeric, errors = "coerce")
+	raw_tot_columns = raw_tot_columns.dropna(axis = 1, how = "all")
+	if raw_tot_columns.empty or raw_tot_columns.shape[1] == 0:
+		return pd.DataFrame(columns = output_columns)
 	
 	# Filter to cells with 'min_reads_per_amplicon_per_cell' or more reads for all amplicons
 	mask = (raw_tot_columns >= min_reads_per_amplicon_per_cell).all(axis = 1)
@@ -4782,34 +4792,23 @@ def generate_amplicon_score(raw_tot_columns, min_reads_per_amplicon_per_cell, mi
 	raw_tot_columns = raw_tot_columns.loc[mask]
 
 	logging.info('Cells that did not pass the read count per amplicon cutoff:' + str(len(mask) - sum(mask)))
-   
-	# Filter
-	# Create a list of the percentile values for each amplicon
-	percentile_values = []
-	for percentile in percentile_cutoffs:
-		percentile_values.append(raw_tot_columns.quantile(percentile, axis = 0))
-		
-	# Create a dictionary to store the amplicon scores
-	amplicon_dict = {}
+
+	if raw_tot_columns.empty:
+		return pd.DataFrame(columns = output_columns)
 	
-	# Calculate the amplicon statistic
-	for df_index, row in raw_tot_columns.iterrows():
-		barcode_sum = 0
-		for index in range(0, len(percentile_cutoffs)):
-			# Get the percentile values for the current amplicon
-			percentile_vals = percentile_values[index]
-			# Get the constant value for the current percentile cutoff
-			constant_val = constant_values[index]
-			# Calculate the amplicon stat: 
-			# percentage of amplicon values over the percentile value multiplied by a constant
-			amplicon_stat = ((sum(row >= percentile_vals)) / len(percentile_vals)) * constant_val
-			barcode_sum += amplicon_stat
-		# Assign the amplicon score to the amplicon dictionary
-		amplicon_dict[df_index] = barcode_sum
+	amplicon_scores = pd.Series(0, index = raw_tot_columns.index, dtype = float)
+	for percentile, constant_val in zip(percentile_cutoffs, constant_values):
+		percentile_vals = raw_tot_columns.quantile(percentile, axis = 0)
+		stat = (
+			raw_tot_columns.ge(percentile_vals, axis = 1).sum(axis = 1)
+			/ len(percentile_vals)
+		) * constant_val
+		amplicon_scores += stat
 	
-	amplicon_df = pd.DataFrame.from_dict(amplicon_dict, orient = 'index', columns = ['Amplicon Score'])
-	raw_sum = raw_tot_columns.sum(axis = 1)
-	amplicon_df['Read Count'] = raw_sum
+	amplicon_df = pd.DataFrame({
+		'Amplicon Score': amplicon_scores,
+		'Read Count': raw_tot_columns.sum(axis = 1),
+	})
 	amplicon_df = amplicon_df.sort_values("Read Count", ascending = False)
 	amplicon_df['Barcode Rank'] = range(1, len(amplicon_df) + 1)
 	

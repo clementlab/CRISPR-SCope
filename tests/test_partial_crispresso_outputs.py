@@ -1,8 +1,10 @@
 import gzip
 
 import pandas as pd
+import pytest
 
 from CRISPRSCope.cli import (
+    generate_amplicon_score,
     parse_crispresso_outputs,
     write_filtered_editing_summary_from_filtered_crispresso,
 )
@@ -76,6 +78,43 @@ def test_parse_crispresso_outputs_preserves_failed_amplicons_as_na(tmp_path):
     assert filtered_pseudobulk.loc[0, "modPct.amp_ok"] == 25.0
     assert pd.isna(filtered_pseudobulk.loc[0, "totCount.amp_failed"])
     assert pd.isna(filtered_pseudobulk.loc[0, "modPct.amp_failed"])
+
+
+def test_generate_amplicon_score_ignores_all_na_failed_amplicons():
+    totals = pd.DataFrame(
+        {
+            "totCount.amp_ok": [10, 20],
+            "totCount.amp_failed": ["NA", "NA"],
+        },
+        index=["cell_low", "cell_high"],
+    )
+
+    amp_score = generate_amplicon_score(
+        totals,
+        min_reads_per_amplicon_per_cell=0,
+        min_total_reads_per_barcode=0,
+    )
+
+    assert list(amp_score.index) == ["cell_high", "cell_low"]
+    assert amp_score.loc["cell_high", "Read Count"] == 20
+    assert amp_score.loc["cell_low", "Read Count"] == 10
+    assert amp_score.loc["cell_high", "Amplicon Score"] == 161
+    assert amp_score.loc["cell_low", "Amplicon Score"] == 0
+
+
+def test_generate_amplicon_score_rejects_duplicate_amplicon_columns():
+    totals = pd.DataFrame(
+        [[10, 12], [20, 22]],
+        columns=["totCount.amp_dup", "totCount.amp_dup"],
+        index=["cellA", "cellB"],
+    )
+
+    with pytest.raises(ValueError, match="Duplicate amplicon names detected"):
+        generate_amplicon_score(
+            totals,
+            min_reads_per_amplicon_per_cell=0,
+            min_total_reads_per_barcode=0,
+        )
 
 
 def _write_first_pass_summ(path, rows):
