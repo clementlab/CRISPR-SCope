@@ -72,6 +72,157 @@ STAGE_FILTER = 4
 
 _SAFE_FN_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
+
+def _resolve_settings_path(path_value: str, settings_dir: str) -> str:
+	"""
+	Resolve a path from the settings file relative to the settings file directory.
+	"""
+	path_value = str(path_value).strip()
+	if os.path.isabs(path_value):
+		return os.path.abspath(path_value)
+	return os.path.abspath(os.path.join(settings_dir, path_value))
+
+
+def _resolve_settings_path_list(path_values: str, settings_dir: str) -> str:
+	"""
+	Resolve a comma-separated path list from the settings file.
+	"""
+	return ",".join(
+		_resolve_settings_path(path_value, settings_dir)
+		for path_value in str(path_values).split(",")
+	)
+
+
+def _parse_bool_setting(settings, key, default=False):
+	if key not in settings:
+		return default
+	val = str(settings[key]).strip().lower()
+	if val in ("true", "yes", "1"):
+		return True
+	if val in ("false", "no", "0"):
+		return False
+	raise ValueError(f"Invalid value for {key}: {settings[key]!r}. Expected True or False.")
+
+
+def _parse_int_setting(settings, key, default, minimum=None):
+	raw_value = settings.get(key, default)
+	try:
+		value = int(raw_value)
+	except Exception as e:
+		raise ValueError(f"Invalid value for {key}: {raw_value!r} ({e})")
+	if minimum is not None and value < minimum:
+		raise ValueError(f"{key} must be >= {minimum}")
+	return value
+
+
+def _parse_float_setting(settings, key, default, minimum=None):
+	raw_value = settings.get(key, default)
+	try:
+		value = float(raw_value)
+	except Exception as e:
+		raise ValueError(f"Invalid value for {key}: {raw_value!r} ({e})")
+	if minimum is not None and value < minimum:
+		raise ValueError(f"{key} must be >= {minimum}")
+	return value
+
+
+def _settings_value_is_path(value: str) -> bool:
+	return str(value).strip().lower() not in ("", "true", "yes", "1", "false", "no", "0", "none")
+
+
+def _normalize_optional_guide(guide):
+	if guide is None:
+		return ""
+	guide = str(guide).strip()
+	if guide.lower() in ("", "na", "none"):
+		return ""
+	return guide
+
+
+def _build_input_ref_names(num_references):
+	return ['Reference'] + ['Amplicon' + str(i) for i in range(1, num_references)]
+
+
+def _resolve_existing_fastq_path(path):
+	if not path or path in ("NA", "None"):
+		return None
+	if os.path.isfile(path):
+		return path
+	if not str(path).endswith(".gz") and os.path.isfile(path + ".gz"):
+		return path + ".gz"
+	return None
+
+
+def _load_split_read_cache(info_file, amp_file_dir):
+	amplicon_names = []
+	amplicon_information = {}
+	cache_is_valid = True
+	with open(info_file, 'r') as fin:
+		head = fin.readline().strip()
+		head_els = head.split("\t")
+		for line in fin:
+			line_els = line.strip().split("\t")
+			if not line_els or line_els[0] == "":
+				continue
+			amp_info = dict(zip(head_els,line_els))
+			amp_name = line_els[0]
+			if 'reads_r1_file' not in amp_info or amp_info['reads_r1_file'] in ('', 'NA'):
+				amp_info['reads_r1_file'] = build_stage_filename(
+					stage=STAGE_SPLIT,
+					tag="reads_all_cells",
+					amplicon=amp_name,
+					read="r1",
+					ext="fq",
+					output_root=amp_file_dir,
+				)
+			if 'reads_r2_file' not in amp_info or amp_info['reads_r2_file'] in ('', 'NA'):
+				amp_info['reads_r2_file'] = build_stage_filename(
+					stage=STAGE_SPLIT,
+					tag="reads_all_cells",
+					amplicon=amp_name,
+					read="r2",
+					ext="fq",
+					output_root=amp_file_dir,
+				)
+			if amp_info.get('aln_count') not in ('0', 0, None):
+				r1_cached = _resolve_existing_fastq_path(amp_info.get('reads_r1_file'))
+				r2_cached = _resolve_existing_fastq_path(amp_info.get('reads_r2_file'))
+				if not r1_cached or not r2_cached:
+					cache_is_valid = False
+					logging.warning(
+						"Ignoring stale split-read cache for %s because referenced FASTQ files are missing",
+						amp_name,
+					)
+				else:
+					amp_info['reads_r1_file'] = r1_cached
+					amp_info['reads_r2_file'] = r2_cached
+			amplicon_information[amp_name] = amp_info
+			amplicon_names.append(amp_name)
+	return cache_is_valid, amplicon_names, amplicon_information
+
+
+def _parse_settings_file(settings_file):
+	settings = {}
+	with open(settings_file, 'r') as sin:
+		for line_number, line in enumerate(sin, start=1):
+			line = line.rstrip("\n")
+			stripped = line.strip()
+			if stripped == "" or stripped.startswith("#"):
+				continue
+			if "\t" not in line:
+				raise ValueError(
+					f"Invalid settings line {line_number}: line must be key<TAB>value"
+				)
+			key, value = line.split("\t", 1)
+			key = key.strip()
+			value = value.strip()
+			if not key or value == "":
+				raise ValueError(
+					f"Invalid settings line {line_number}: line must be key<TAB>value"
+				)
+			settings[key] = value
+	return settings
+
 def _sanitize_token(token: Optional[str]) -> str:
 	"""
 	Convert an arbitrary string into a filesystem-safe token.
@@ -285,6 +436,28 @@ def safe_remove(path: str, silent: bool = False) -> bool:
 		if not silent:
 			raise
 		return False
+
+
+class ExternalCommandError(RuntimeError):
+	"""Raised when an external command exits unsuccessfully."""
+
+
+def _command_to_string(command):
+	if isinstance(command, (list, tuple)):
+		return shlex.join([str(x) for x in command])
+	return str(command)
+
+
+def _raise_command_error(command, returncode=None, context=None, stderr=None):
+	message = "External command failed"
+	if returncode is not None:
+		message += f" with return code {returncode}"
+	message += f": {_command_to_string(command)}"
+	if context:
+		message += f" ({context})"
+	if stderr:
+		message += f"\n{stderr.strip()}"
+	raise ExternalCommandError(message)
 
 
 def validate_output_root(output_root: str) -> str:
@@ -1532,13 +1705,12 @@ def parse_settings(args):
 	# First argument passed on command line is the settings file #
 	settings_file = sys.argv[1]
 	settings_file = os.path.abspath(settings_file)
-	settings = {}
+	settings_dir = os.path.dirname(settings_file)
 	
 	# Checking if a debug parameter has been provided to the function call #
 	logging_level = logging.INFO
 	if len(args) > 2 and 'debug' in args[2].lower():
 		logging_level=logging.DEBUG
-		settings['debug'] = True
 
 	# Settings up logging formatting and parameters
 	log_formatter = logging.Formatter("%(asctime)s:%(levelname)s: %(message)s")
@@ -1558,20 +1730,12 @@ def parse_settings(args):
 	logging.info('Parsing settings file..')
 
 	# Parse the settings file and write to a dictionary {key '\t' value}
-	with open(settings_file,'r') as sin:
-		for line in sin:
-			line = line.strip()
-			if line.startswith("#"):
-				continue
-			if line == "":
-				continue
-			(key,value) = line.split("\t")
-			settings[key] = value
+	settings = _parse_settings_file(settings_file)
 
 	# Checking for various required settings and raising exceptions for missing values
 	if 'r1' not in settings:
 		raise Exception('Settings file must contain an entry for r1')
-	r1 = settings['r1'].strip()
+	r1 = _resolve_settings_path_list(settings['r1'], settings_dir)
 	# Verifying that all of the read files exist
 	for r1_file in r1.split(","):
 		if not os.path.isfile(r1_file):
@@ -1580,7 +1744,7 @@ def parse_settings(args):
 	# Same as above for r1
 	if 'r2' not in settings:
 		raise Exception('Settings file must contain an entry for r2')
-	r2 = settings['r2'].strip()
+	r2 = _resolve_settings_path_list(settings['r2'], settings_dir)
 	for r2_file in r2.split(","):
 		if not os.path.isfile(r2_file):
 			raise Exception('Input r2 ' + r2_file + ' does not exist')
@@ -1595,14 +1759,12 @@ def parse_settings(args):
 		raise Exception('Settings file must contain an entry for constant2')
 	constant2 = settings['constant2'].strip()
 
-	allow_barcode_mismatches = False
-	if 'allowBarcodeMismatches' in settings:
-		allow_barcode_mismatches = True
+	allow_barcode_mismatches = _parse_bool_setting(settings, 'allowBarcodeMismatches', default=False)
 
 	# Checking for inclusion and existence of a barcode file
 	if 'barcodes' not in settings:
 		raise Exception('Settings file must contain an entry for barcodes')
-	barcode_file = settings['barcodes'].strip()
+	barcode_file = _resolve_settings_path(settings['barcodes'], settings_dir)
 	if not os.path.isfile(barcode_file):
 		raise Exception('Barcode file ' + barcode_file + ' does not exist')
 
@@ -1610,19 +1772,25 @@ def parse_settings(args):
 	# Checking for existence and inclusion of an amplicon file
 	if 'amplicons' not in settings:
 		raise Exception('Settings file must contain an entry for amplicons')
-	amplicon_file = os.path.abspath(settings['amplicons'])
+	amplicon_file = _resolve_settings_path(settings['amplicons'], settings_dir)
 	if not os.path.isfile(amplicon_file):
 		raise Exception('Amplicon file does not exist at ' + amplicon_file)
 
 	# Settings primer lookup length
-	primer_lookup_len = 18
 	if 'primerLookupLen' in settings:
-		primer_lookup_len = int(settings['primer_lookup_len'])
+		raise ValueError("primerLookupLen is no longer supported. Use primer_lookup_len instead.")
+	primer_lookup_len = _parse_int_setting(settings, 'primer_lookup_len', 18, minimum=1)
 
 	# Settings adapter DNA seq
 	adapter_DNA = "TGTCTCTTATACACATCTCCGAGCCCACGAG"
-	if 'plamsid_DNA' in settings:
-		adapter_DNA = settings['adapter_DNA']
+	if 'adapter_DNA' in settings:
+		adapter_DNA = settings['adapter_DNA'].strip()
+	else:
+		for legacy_key in ('plamsid_DNA', 'plasmid_DNA'):
+			if legacy_key in settings:
+				adapter_DNA = settings[legacy_key].strip()
+				logging.warning("%s is deprecated; use adapter_DNA instead.", legacy_key)
+				break
 
 	n_processes = mp.cpu_count()
 	if 'processes' in settings and settings['processes'] != 'max':
@@ -1630,47 +1798,23 @@ def parse_settings(args):
 	if not n_processes or n_processes < 1:
 		raise ValueError("n_processes must be >= 1")
 
-	keep_intermediate_files = False
-	if 'keep_intermediate_files' in settings and settings['keep_intermediate_files'].lower() == 'true':
-		keep_intermediate_files = True
+	keep_intermediate_files = _parse_bool_setting(settings, 'keep_intermediate_files', default=False)
 
-	ignore_substitutions = False
-	if 'ignore_substitutions' in settings and settings['ignore_substitutions'].lower() == 'true':
-		ignore_substitutions = True
+	ignore_substitutions = _parse_bool_setting(settings, 'ignore_substitutions', default=False)
 
-	assign_reads_to_all_possible_amplicons = False # Default behavior is NOT permissive
-	if 'assign_reads_to_all_possible_amplicons' in settings and settings['assign_reads_to_all_possible_amplicons'].lower() == 'true':
-		assign_reads_to_all_possible_amplicons = True
+	assign_reads_to_all_possible_amplicons = _parse_bool_setting(settings, 'assign_reads_to_all_possible_amplicons', default=False)
 
-	debug_require_strict_amplicon_alignment = False
-	if 'debug_require_strict_amplicon_alignment' in settings:
-		debug_require_strict_amplicon_alignment = settings['debug_require_strict_amplicon_alignment'].strip().lower() == 'true'
+	debug_require_strict_amplicon_alignment = _parse_bool_setting(settings, 'debug_require_strict_amplicon_alignment', default=False)
 	if assign_reads_to_all_possible_amplicons and debug_require_strict_amplicon_alignment:
 		raise ValueError("debug_require_strict_amplicon_alignment cannot be used with assign_reads_to_all_possible_amplicons")
 
-	suppress_sub_crispresso_plots = False
-	if 'suppress_sub_crispresso_plots' in settings and settings['suppress_sub_crispresso_plots'].lower() == 'true':
-		suppress_sub_crispresso_plots = True
+	suppress_sub_crispresso_plots = _parse_bool_setting(settings, 'suppress_sub_crispresso_plots', default=False)
 
-	write_h5ad = True
-	if 'write_h5ad' in settings:
-		write_h5ad = settings['write_h5ad'].strip().lower() == 'true'
+	write_h5ad = _parse_bool_setting(settings, 'write_h5ad', default=True)
 	
 	# --- normalized cutoffs (use canonical defaults and validate) ---
-	try:
-		# read user-provided values but store in canonical internal names
-		min_total_reads_per_barcode = int(settings.get('min_total_reads_per_barcode', MIN_TOTAL_READS_PER_BARCODE_DEFAULT))
-		if min_total_reads_per_barcode < 0:
-			raise ValueError("min_total_reads_per_barcode must be >= 0")
-	except Exception as e:
-		raise ValueError(f"Invalid min_total_reads_per_barcode: {e}")
-
-	try:
-		min_reads_per_amplicon_per_cell = int(settings.get('min_reads_per_amplicon_per_cell', MIN_READS_PER_AMPLICON_PER_CELL_DEFAULT))
-		if min_reads_per_amplicon_per_cell < 0:
-			raise ValueError("min_reads_per_amplicon_per_cell must be >= 0")
-	except Exception as e:
-		raise ValueError(f"Invalid min_reads_per_amplicon_per_cell: {e}")
+	min_total_reads_per_barcode = _parse_int_setting(settings, 'min_total_reads_per_barcode', MIN_TOTAL_READS_PER_BARCODE_DEFAULT, minimum=0)
+	min_reads_per_amplicon_per_cell = _parse_int_setting(settings, 'min_reads_per_amplicon_per_cell', MIN_READS_PER_AMPLICON_PER_CELL_DEFAULT, minimum=0)
 	
 	# --- parse cell-quality selection (explicit booleans, depth-only terminology) ---
 
@@ -1686,16 +1830,8 @@ def parse_settings(args):
 
 	for key, code in _cell_quality_flag_map.items():
 		if key in settings:
-			val = settings[key].strip().lower()
-			if val == "true":
+			if _parse_bool_setting(settings, key):
 				cell_quality_to_analyze.add(code)
-			elif val == "false":
-				pass  # explicitly excluded
-			else:
-				raise ValueError(
-					f"Invalid value for {key}: '{settings[key]}'. "
-					"Expected True or False."
-				)
 
 	# Default behavior if user specifies none explicitly:
 	# Include High_score_High_depth only
@@ -1710,16 +1846,16 @@ def parse_settings(args):
 		# .bt2 / .bt21 are the index files generated by bowtie2-build
 	bowtie2_index = ""
 	if 'bowtie2_index' in settings:
-		bowtie2_index = settings['bowtie2_index'].replace(".fa","")
+		bowtie2_index = _resolve_settings_path(settings['bowtie2_index'].replace(".fa",""), settings_dir)
 	if 'genome' in settings:
-		bowtie2_index = settings['genome'].replace(".fa","")
+		bowtie2_index = _resolve_settings_path(settings['genome'].replace(".fa",""), settings_dir)
 	if not os.path.isfile(bowtie2_index+".1.bt2") and not os.path.isfile(bowtie2_index+".1.bt2l"):
 		raise Exception('bowtie2_index file does not exist at ' + bowtie2_index + ".bt2 or " + bowtie2_index + ".bt2l")
 
 	# Checking for existence and inclusion of an alternate alleles file
 	alt_alleles_file = ""
 	if 'alt_alleles_file' in settings:
-		alt_alleles_file = settings['alt_alleles_file']
+		alt_alleles_file = _resolve_settings_path(settings['alt_alleles_file'], settings_dir)
 		if not os.path.isfile(alt_alleles_file):
 			raise Exception('Alt alleles file does not exist at ' + alt_alleles_file)
 
@@ -1727,11 +1863,11 @@ def parse_settings(args):
 		# if not provided, an suffix is appended onto the settings file name
 	output_root = settings_file
 	if 'output_root' in settings:
-		output_root = settings['output_root']
+		output_root = _resolve_settings_path(settings['output_root'], settings_dir)
 
 	h5ad_output = output_root + ".h5ad"
 	if 'h5ad_output' in settings:
-		h5ad_output = settings['h5ad_output']
+		h5ad_output = _resolve_settings_path(settings['h5ad_output'], settings_dir)
 
 	debug_rescued_reads_bam = ""
 	if 'debug_rescued_reads_bam' in settings:
@@ -1740,6 +1876,8 @@ def parse_settings(args):
 			debug_rescued_reads_bam = output_root + ".splitReads.rescued.bam"
 		elif debug_rescued_reads_bam.lower() in ("false", "no", "0", "none"):
 			debug_rescued_reads_bam = ""
+		elif _settings_value_is_path(debug_rescued_reads_bam):
+			debug_rescued_reads_bam = _resolve_settings_path(debug_rescued_reads_bam, settings_dir)
 
 	debug_rejected_rescue_reads_bam = ""
 	if 'debug_rejected_rescue_reads_bam' in settings:
@@ -1748,16 +1886,15 @@ def parse_settings(args):
 			debug_rejected_rescue_reads_bam = output_root + ".splitReads.rejected_rescue_candidates.bam"
 		elif debug_rejected_rescue_reads_bam.lower() in ("false", "no", "0", "none"):
 			debug_rejected_rescue_reads_bam = ""
+		elif _settings_value_is_path(debug_rejected_rescue_reads_bam):
+			debug_rejected_rescue_reads_bam = _resolve_settings_path(debug_rejected_rescue_reads_bam, settings_dir)
 
-	try:
-		partial_rescue_min_mean_read_quality = float(settings.get(
-			'partial_rescue_min_mean_read_quality',
-			PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT,
-		))
-		if partial_rescue_min_mean_read_quality < 0:
-			raise ValueError("partial_rescue_min_mean_read_quality must be >= 0")
-	except Exception as e:
-		raise ValueError(f"Invalid partial_rescue_min_mean_read_quality: {e}")
+	partial_rescue_min_mean_read_quality = _parse_float_setting(
+		settings,
+		'partial_rescue_min_mean_read_quality',
+		PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT,
+		minimum=0,
+	)
 
 	h5ad_zygosity = {}
 	for key, default in H5AD_ZYGOSITY_DEFAULTS.items():
@@ -1777,23 +1914,23 @@ def parse_settings(args):
 	# Generating amplicon output directory if it does not exist
 	amp_file_dir = output_root + ".seq_by_amplicon"
 	if not os.path.isdir(amp_file_dir):
-		os.mkdir(amp_file_dir)
+		os.makedirs(amp_file_dir, exist_ok=True)
 
 	crispresso_dir = output_root + ".crispresso"
 	if not os.path.isdir(crispresso_dir):
-		os.mkdir(crispresso_dir)
+		os.makedirs(crispresso_dir, exist_ok=True)
 
 
 	#check software
 	#check bowtie2
 	try:
-		bowtie_result = sb.check_output('bowtie2 --version', stderr=sb.STDOUT,shell=True)
+		bowtie_result = sb.check_output(['bowtie2', '--version'], stderr=sb.STDOUT)
 	except Exception:
 		raise Exception('Error: bowtie2 is required')
 
 	#check crispresso
 	try:
-		crispresso_result = sb.check_output('CRISPResso --version', stderr=sb.STDOUT,shell=True)
+		crispresso_result = sb.check_output(['CRISPResso', '--version'], stderr=sb.STDOUT)
 	except Exception:
 		raise Exception('Error: CRISPResso2 is required')
 
@@ -2372,8 +2509,25 @@ def run_alignment(args):
 	- Intended for multiprocessing execution.
 	"""
 	r1_path, r2_path, bowtie2_index, threads, out_name = args
-	align_cmd = f'bowtie2 -x {bowtie2_index} -p {threads} -1 {r1_path} -2 {r2_path} 2>>{out_name}.bowtie2.log | samtools view -bS - > {out_name}'
-	run_command(align_cmd)
+	log_file = out_name + ".bowtie2.log"
+	bowtie_cmd = ["bowtie2", "-x", bowtie2_index, "-p", str(threads), "-1", r1_path, "-2", r2_path]
+	samtools_cmd = ["samtools", "view", "-bS", "-"]
+	logging.debug("running: %s | %s", _command_to_string(bowtie_cmd), _command_to_string(samtools_cmd))
+	with open(log_file, "a") as bowtie_log, open(out_name, "wb") as bam_out:
+		bowtie_proc = sb.Popen(bowtie_cmd, stdout=sb.PIPE, stderr=bowtie_log)
+		samtools_proc = sb.Popen(samtools_cmd, stdin=bowtie_proc.stdout, stdout=bam_out, stderr=sb.PIPE)
+		bowtie_proc.stdout.close()
+		_, samtools_stderr = samtools_proc.communicate()
+		bowtie_return = bowtie_proc.wait()
+		if bowtie_return != 0:
+			_raise_command_error(bowtie_cmd, bowtie_return, context=f"see {log_file}")
+		if samtools_proc.returncode != 0:
+			_raise_command_error(
+				samtools_cmd,
+				samtools_proc.returncode,
+				context=f"creating {out_name}",
+				stderr=samtools_stderr.decode(errors="replace") if samtools_stderr else None,
+			)
 
 def parse_and_align_reads(r1_fastqs,r2_fastqs,constant1,constant2,
 						  output_root,barcode_file,allow_barcode_mismatches,
@@ -2509,11 +2663,11 @@ def parse_and_align_reads(r1_fastqs,r2_fastqs,constant1,constant2,
 
 	# Check for multiple parsed_results
 	if len(parsed_results) > 1: 
-		input_bams = " ".join(result[2] for result in parsed_results)
+		input_bams = [result[2] for result in parsed_results]
 		#inter_bam = output_root+".merged.bam"
 		inter_bam = build_stage_filename(STAGE_ALIGN, "intermediate_merged", ext="bam", output_root=output_root)
 		start_bam_cat = time.time()
-		run_command(f"samtools cat -o {inter_bam} {input_bams}")
+		run_command(["samtools", "cat", "-o", inter_bam] + input_bams)
 		end_bam_cat = time.time() - start_bam_cat
 		logging.info("BAM cat ended in %.3f seconds", end_bam_cat)
 		logging.info("Inside parsed_results > 1")
@@ -2522,7 +2676,7 @@ def parse_and_align_reads(r1_fastqs,r2_fastqs,constant1,constant2,
 		logging.info("Inside parsed_results == 1")
 
 	bam_threads = min(12, n_processes)
-	sort_bam_cmd = f'samtools sort -n -@ {bam_threads} -o {aligned_bam} {inter_bam}'
+	sort_bam_cmd = ["samtools", "sort", "-n", "-@", str(bam_threads), "-o", aligned_bam, inter_bam]
 		 
 	start_bam_sort = time.time() 
 	run_command(sort_bam_cmd)
@@ -2797,40 +2951,11 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 
 	info_file = output_root+".splitReads.ampliconInfo.txt"
 	if os.path.isfile(info_file):
-		with open(info_file,'r') as fin:
-			head = fin.readline().strip()
-			head_els = head.split("\t")
-			amplicon_names = []
-			amplicon_information = {}
-			for line in fin:
-				line_els = line.strip().split("\t")
-				amp_info = dict(zip(head_els,line_els))
-				amp_name = line_els[0]
-				if 'reads_r1_file' not in amp_info or amp_info['reads_r1_file'] in ('', 'NA'):
-					#amp_info['reads_r1_file'] = os.path.join(amp_file_dir, amp_name + '.r1.fq')
-					amp_info['reads_r1_file'] = build_stage_filename(
-				stage=STAGE_SPLIT,
-				tag="reads_all_cells",
-				amplicon=amp_name,
-				read="r1",
-				ext="fq",
-				output_root=amp_file_dir,
-			)
-				if 'reads_r2_file' not in amp_info or amp_info['reads_r2_file'] in ('', 'NA'):
-					#amp_info['reads_r2_file'] = os.path.join(amp_file_dir, amp_name + '.r2.fq')
-					amp_info['reads_r2_file'] = build_stage_filename(
-				stage=STAGE_SPLIT,
-				tag="reads_all_cells",
-				amplicon=amp_name,
-				read="r2",
-				ext="fq",
-				output_root=amp_file_dir,
-			)
-				amplicon_information[amp_name] = amp_info
-				amplicon_names.append(amp_name)
-
-		logging.info ("Finished splitting reads")
-		return amplicon_names,amplicon_information,info_file
+		cache_is_valid, amplicon_names, amplicon_information = _load_split_read_cache(info_file, amp_file_dir)
+		if cache_is_valid:
+			logging.info ("Finished splitting reads")
+			return amplicon_names,amplicon_information,info_file
+		os.remove(info_file)
 
 	logging.info("Splitting reads to amplicons..")
 
@@ -2896,10 +3021,13 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	#align amplicons to genome
 	bowtie2_log = output_root+".amplicons.alignReads.log"
 	aligned_amps_file = output_root + ".amplicons.aligned.sam"
-	align_command = 'bowtie2 -k 2 -x %s -p %s -f -U %s 2>>%s > %s'%(bowtie2_index,n_processes,amplicon_fasta_file,bowtie2_log,aligned_amps_file)
+	align_command = ["bowtie2", "-k", "2", "-x", bowtie2_index, "-p", str(n_processes), "-f", "-U", amplicon_fasta_file]
 	with open(bowtie2_log,'w') as bt2log:
-		bt2log.write(align_command)
-	run_command(align_command)
+		bt2log.write(_command_to_string(align_command) + "\n")
+		with open(aligned_amps_file, "w") as aligned_amps:
+			completed = sb.run(align_command, stdout=aligned_amps, stderr=bt2log)
+	if completed.returncode != 0:
+		_raise_command_error(align_command, completed.returncode, context=f"see {bowtie2_log}")
 
 	#genome_amplicon_locs = {}#chr,start -> amplicon
 	start_amplicon_locs = {}# chr,start -> amplicon
@@ -2978,7 +3106,7 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	rejected_rescue_contradictory_alignment_count = 0
 	rejected_rescue_no_inward_boundary_support_count = 0
 	unmapped_reads_count = 0 #unmapped by bowtie
-	bam_iter = get_command_output('samtools view %s'%(aligned_bam))#read in the aligned bam file
+	bam_iter = get_command_output(["samtools", "view", aligned_bam])#read in the aligned bam file
 	rescued_reads_writer, rescued_reads_proc = _open_rescued_reads_writer(aligned_bam, debug_rescued_reads_bam)
 	if debug_rescued_reads_bam:
 		logging.info("Writing partial-alignment rescued reads to " + debug_rescued_reads_bam)
@@ -3282,8 +3410,8 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	#zip output
 	amp_commands = []
 	for amp_filename_r1,amp_filename_r2 in amp_filenames:
-		amp_commands.append('gzip -f ' + amp_filename_r1)
-		amp_commands.append('gzip -f ' + amp_filename_r2)
+		amp_commands.append(["gzip", "-f", amp_filename_r1])
+		amp_commands.append(["gzip", "-f", amp_filename_r2])
 
 
 	logging.info("gzipping output on "+ str(n_processes) + " threads..")
@@ -3372,8 +3500,8 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 
 	if not keep_intermediate_files:
 		logging.debug('Deleting intermediate amplicon files')
-		delete_command = 'rm %s && rm %s'%(amplicon_fasta_file,aligned_amps_file)
-		run_command(delete_command)
+		safe_remove(amplicon_fasta_file, silent=True)
+		safe_remove(aligned_amps_file, silent=True)
 
 	return amplicon_names,amplicon_information,info_file
 
@@ -3432,7 +3560,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 		info_file = output_root+".crispresso.filtered.info.txt"
 		crispresso_dir = crispresso_dir + ".filtered"
 		if not os.path.isdir(crispresso_dir):
-			os.mkdir(crispresso_dir)
+			os.makedirs(crispresso_dir, exist_ok=True)
 		
 	else:
 		info_file = output_root+".crispresso.info.txt"
@@ -3450,6 +3578,10 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 
 		cache_is_valid = True
 		for amplicon_name, amp_info in crispresso_information.items():
+			if amp_info.get('status') == 'Failed':
+				cache_is_valid = False
+				logging.warning("Ignoring stale CRISPResso info cache because %s previously failed", amplicon_name)
+				break
 			if amp_info.get('status') != 'Completed':
 				continue
 			finished_file = amp_info.get('finished_file')
@@ -3499,13 +3631,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 				amp_filename_r2 = amplicon_information[amplicon_name].get('reads_r2_file')
 			
 			amplicon_seqs = amplicon_information[amplicon_name]['amp_seqs']
-			guide = amplicon_information[amplicon_name]['guide_seq']
-			guide_str = " -g " + guide + " "
-			if guide.lower() == "na" or guide.lower() == "none":
-				guide_str = ""
-			suppress_sub_crispresso_plots_str = ""
-			if suppress_sub_crispresso_plots:
-				suppress_sub_crispresso_plots_str = " --suppress_report --suppress_plots"
+			guide = _normalize_optional_guide(amplicon_information[amplicon_name].get('guide_seq', ''))
 			
 			
 			# Separate crispresso_cmd for alleles and non alleles
@@ -3539,7 +3665,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					"-r1", amp_filename,
 					"-a", amplicon_seqs,
 				]
-				if guide != "":
+				if guide:
 					crispresso_args.extend(["-g", guide])
 				
 			else:
@@ -3565,7 +3691,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					"-r2", amp_filename_r2,
 					"-a", amplicon_seqs,
 				]
-				if guide != "":
+				if guide:
 					crispresso_args.extend(["-g", guide])
 			
 			if suppress_sub_crispresso_plots:
@@ -3614,6 +3740,13 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 		result = pool.map_async(run_crispresso_command, crispresso_commands).get(threading.TIMEOUT_MAX)
 		pool.close()
 		pool.join()
+		for completed_job in result:
+			if completed_job.get('error'):
+				_raise_command_error(
+					completed_job.get('command'),
+					completed_job.get('returncode'),
+					context=completed_job.get('error'),
+				)
 
 	for amplicon_name in amplicon_names:
 		if 'status' in crispresso_information[amplicon_name] and crispresso_information[amplicon_name]['status'] == 'Skipped':
@@ -3710,18 +3843,20 @@ def run_command(cmd):
 
 	Notes
 	-----
-	- Executes with `shell=True`.
 	- Logs the command at DEBUG level.
-	- Errors are logged but not raised.
-	- Does not capture stdout.
+	- Raises ExternalCommandError on failures.
 	"""
 	try:
-		logging.debug('running: ' + cmd)
-		return_value = sb.call(cmd,shell=True)
-		return {'returncode': return_value, 'error': None}
+		logging.debug('running: ' + _command_to_string(cmd))
+		completed = sb.run(cmd, shell=isinstance(cmd, str), stdout=sb.PIPE, stderr=sb.PIPE)
 	except Exception as e:
-		logging.error("error: %s on %s" % (e, cmd))
-		return {'returncode': None, 'error': str(e)}
+		logging.error("error: %s on %s" % (e, _command_to_string(cmd)))
+		_raise_command_error(cmd, context=str(e))
+	if completed.returncode != 0:
+		stderr = completed.stderr.decode(errors="replace") if isinstance(completed.stderr, bytes) else completed.stderr
+		logging.error("return code %s on %s", completed.returncode, _command_to_string(cmd))
+		_raise_command_error(cmd, completed.returncode, stderr=stderr)
+	return {'returncode': completed.returncode, 'error': None}
 
 def get_command_output(command):
 	"""
@@ -3739,16 +3874,17 @@ def get_command_output(command):
 
 	Notes
 	-----
-	- Uses subprocess.Popen with shell=True.
+	- Uses subprocess.Popen without a shell when an argument list is provided.
 	- stderr is redirected to stdout.
 	- Caller is responsible for consuming the iterator.
 	""" 
 	p = sb.Popen(command,
 			stdout=sb.PIPE,
-			stderr=sb.STDOUT,shell=True,
+			stderr=sb.STDOUT,
+			shell=isinstance(command, str),
 			universal_newlines=True,
 			bufsize=-1)#bufsize system default
-	return iter(p.stdout.readline, b'')
+	return iter(p.stdout.readline, '')
 
 def parse_one_crispresso_output(this_args):
 	"""
@@ -3933,9 +4069,7 @@ def parse_one_crispresso_output(this_args):
 		num_references = len(seen_refs)
 
 	#set up allele order
-	input_ref_names = ['Reference']
-	for i in range(1,num_references):
-		input_ref_names[i] = 'Amplicon'+str(i)
+	input_ref_names = _build_input_ref_names(num_references)
 
 	if 'NA' in input_ref_allele_counts:
 		print('WARNING, NA input ref count!')
