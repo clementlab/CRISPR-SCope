@@ -34,6 +34,7 @@ from CRISPRSCope import __version__
 # Constants and default settings
 MIN_TOTAL_READS_PER_BARCODE_DEFAULT = 10
 MIN_READS_PER_AMPLICON_PER_CELL_DEFAULT = 0
+PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT = 30.0
 H5AD_ZYGOSITY_DEFAULTS = {
 	"wt_max_mod_pct": 20.0,
 	"het_max_mod_pct": 80.0,
@@ -48,6 +49,20 @@ CELL_QUALITY_CODES = {
 }
 
 
+def _numeric_tot_count_columns(df):
+	"""
+	Return total-count columns coerced to numeric values.
+	"""
+	return df.filter(like = "totCount").apply(pd.to_numeric, errors = "coerce")
+
+
+def _numeric_mod_pct_columns(df):
+	"""
+	Return modification-percentage columns coerced to numeric values.
+	"""
+	return df.filter(like = "modPct").apply(pd.to_numeric, errors = "coerce")
+
+
 # Pipeline stage numbering
 STAGE_PARSE = 1
 STAGE_ALIGN = 2
@@ -56,6 +71,157 @@ STAGE_FILTER = 4
 
 
 _SAFE_FN_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _resolve_settings_path(path_value: str, settings_dir: str) -> str:
+	"""
+	Resolve a path from the settings file relative to the settings file directory.
+	"""
+	path_value = str(path_value).strip()
+	if os.path.isabs(path_value):
+		return os.path.abspath(path_value)
+	return os.path.abspath(os.path.join(settings_dir, path_value))
+
+
+def _resolve_settings_path_list(path_values: str, settings_dir: str) -> str:
+	"""
+	Resolve a comma-separated path list from the settings file.
+	"""
+	return ",".join(
+		_resolve_settings_path(path_value, settings_dir)
+		for path_value in str(path_values).split(",")
+	)
+
+
+def _parse_bool_setting(settings, key, default=False):
+	if key not in settings:
+		return default
+	val = str(settings[key]).strip().lower()
+	if val in ("true", "yes", "1"):
+		return True
+	if val in ("false", "no", "0"):
+		return False
+	raise ValueError(f"Invalid value for {key}: {settings[key]!r}. Expected True or False.")
+
+
+def _parse_int_setting(settings, key, default, minimum=None):
+	raw_value = settings.get(key, default)
+	try:
+		value = int(raw_value)
+	except Exception as e:
+		raise ValueError(f"Invalid value for {key}: {raw_value!r} ({e})")
+	if minimum is not None and value < minimum:
+		raise ValueError(f"{key} must be >= {minimum}")
+	return value
+
+
+def _parse_float_setting(settings, key, default, minimum=None):
+	raw_value = settings.get(key, default)
+	try:
+		value = float(raw_value)
+	except Exception as e:
+		raise ValueError(f"Invalid value for {key}: {raw_value!r} ({e})")
+	if minimum is not None and value < minimum:
+		raise ValueError(f"{key} must be >= {minimum}")
+	return value
+
+
+def _settings_value_is_path(value: str) -> bool:
+	return str(value).strip().lower() not in ("", "true", "yes", "1", "false", "no", "0", "none")
+
+
+def _normalize_optional_guide(guide):
+	if guide is None:
+		return ""
+	guide = str(guide).strip()
+	if guide.lower() in ("", "na", "none"):
+		return ""
+	return guide
+
+
+def _build_input_ref_names(num_references):
+	return ['Reference'] + ['Amplicon' + str(i) for i in range(1, num_references)]
+
+
+def _resolve_existing_fastq_path(path):
+	if not path or path in ("NA", "None"):
+		return None
+	if os.path.isfile(path):
+		return path
+	if not str(path).endswith(".gz") and os.path.isfile(path + ".gz"):
+		return path + ".gz"
+	return None
+
+
+def _load_split_read_cache(info_file, amp_file_dir):
+	amplicon_names = []
+	amplicon_information = {}
+	cache_is_valid = True
+	with open(info_file, 'r') as fin:
+		head = fin.readline().strip()
+		head_els = head.split("\t")
+		for line in fin:
+			line_els = line.strip().split("\t")
+			if not line_els or line_els[0] == "":
+				continue
+			amp_info = dict(zip(head_els,line_els))
+			amp_name = line_els[0]
+			if 'reads_r1_file' not in amp_info or amp_info['reads_r1_file'] in ('', 'NA'):
+				amp_info['reads_r1_file'] = build_stage_filename(
+					stage=STAGE_SPLIT,
+					tag="reads_all_cells",
+					amplicon=amp_name,
+					read="r1",
+					ext="fq",
+					output_root=amp_file_dir,
+				)
+			if 'reads_r2_file' not in amp_info or amp_info['reads_r2_file'] in ('', 'NA'):
+				amp_info['reads_r2_file'] = build_stage_filename(
+					stage=STAGE_SPLIT,
+					tag="reads_all_cells",
+					amplicon=amp_name,
+					read="r2",
+					ext="fq",
+					output_root=amp_file_dir,
+				)
+			if amp_info.get('aln_count') not in ('0', 0, None):
+				r1_cached = _resolve_existing_fastq_path(amp_info.get('reads_r1_file'))
+				r2_cached = _resolve_existing_fastq_path(amp_info.get('reads_r2_file'))
+				if not r1_cached or not r2_cached:
+					cache_is_valid = False
+					logging.warning(
+						"Ignoring stale split-read cache for %s because referenced FASTQ files are missing",
+						amp_name,
+					)
+				else:
+					amp_info['reads_r1_file'] = r1_cached
+					amp_info['reads_r2_file'] = r2_cached
+			amplicon_information[amp_name] = amp_info
+			amplicon_names.append(amp_name)
+	return cache_is_valid, amplicon_names, amplicon_information
+
+
+def _parse_settings_file(settings_file):
+	settings = {}
+	with open(settings_file, 'r') as sin:
+		for line_number, line in enumerate(sin, start=1):
+			line = line.rstrip("\n")
+			stripped = line.strip()
+			if stripped == "" or stripped.startswith("#"):
+				continue
+			if "\t" not in line:
+				raise ValueError(
+					f"Invalid settings line {line_number}: line must be key<TAB>value"
+				)
+			key, value = line.split("\t", 1)
+			key = key.strip()
+			value = value.strip()
+			if not key or value == "":
+				raise ValueError(
+					f"Invalid settings line {line_number}: line must be key<TAB>value"
+				)
+			settings[key] = value
+	return settings
 
 def _sanitize_token(token: Optional[str]) -> str:
 	"""
@@ -272,6 +438,28 @@ def safe_remove(path: str, silent: bool = False) -> bool:
 		return False
 
 
+class ExternalCommandError(RuntimeError):
+	"""Raised when an external command exits unsuccessfully."""
+
+
+def _command_to_string(command):
+	if isinstance(command, (list, tuple)):
+		return shlex.join([str(x) for x in command])
+	return str(command)
+
+
+def _raise_command_error(command, returncode=None, context=None, stderr=None):
+	message = "External command failed"
+	if returncode is not None:
+		message += f" with return code {returncode}"
+	message += f": {_command_to_string(command)}"
+	if context:
+		message += f" ({context})"
+	if stderr:
+		message += f"\n{stderr.strip()}"
+	raise ExternalCommandError(message)
+
+
 def validate_output_root(output_root: str) -> str:
 	"""
 	Validate and normalize an output root path.
@@ -374,7 +562,9 @@ def main():
 		crispresso_dir, output_root, n_processes, keep_intermediate_files, 
 		ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, 
 		min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze,
-		write_h5ad, h5ad_output, h5ad_export_config, settings_file
+		write_h5ad, h5ad_output, h5ad_export_config, debug_rescued_reads_bam,
+		debug_rejected_rescue_reads_bam, debug_require_strict_amplicon_alignment,
+		partial_rescue_min_mean_read_quality, settings_file
 		) = parse_settings(sys.argv)
 	end_settings = time.time() - start_settings
 	#print(f"Parse Settings: {end_settings}")
@@ -388,7 +578,7 @@ def main():
 
 
 	start_split_reads = time.time()
-	amplicon_names, amplicon_information, amplicon_info_file = split_reads_by_amplicon(aligned_bam, output_root, amplicon_file, alt_alleles_file, primer_lookup_len, amp_file_dir, bowtie2_index, adapter_DNA, n_processes, keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons)
+	amplicon_names, amplicon_information, amplicon_info_file = split_reads_by_amplicon(aligned_bam, output_root, amplicon_file, alt_alleles_file, primer_lookup_len, amp_file_dir, bowtie2_index, adapter_DNA, n_processes, keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons, debug_rescued_reads_bam, debug_require_strict_amplicon_alignment, debug_rejected_rescue_reads_bam, partial_rescue_min_mean_read_quality)
 	end_split_reads = time.time() - start_split_reads
 	logging.info(f"Split Reads by Amplicon: {end_split_reads}")
 	
@@ -416,6 +606,17 @@ def main():
 	crispresso_filtered_information = run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles = True)
 	end_run_crispresso2 = time.time() - start_run_crispresso2
 	logging.info(f"Run CRISPResso 2: {end_run_crispresso2}")
+
+	start_filtered_summary = time.time()
+	filtered_parsed_information = write_filtered_editing_summary_from_filtered_crispresso(
+		amplicon_names=amplicon_names,
+		crispresso_information=crispresso_information,
+		crispresso_filtered_information=crispresso_filtered_information,
+		output_root=output_root,
+		ignore_substitutions=ignore_substitutions,
+	)
+	end_filtered_summary = time.time() - start_filtered_summary
+	logging.info(f"Write Filtered Editing Summary: {end_filtered_summary}")
 
 	filtered_summary_plot_objects = []
 
@@ -449,17 +650,17 @@ def main():
 		filtered_summary_plot_objects.append(filtered_log_log_plot_obj)
 
 	#
-	filtered_cell_per_amp_obj = cell_per_amp_filtered(parsed_information, output_root, cell_quality_to_analyze)
+	filtered_cell_per_amp_obj = cell_per_amp_filtered(filtered_parsed_information, output_root, cell_quality_to_analyze)
 	if filtered_cell_per_amp_obj is not None:
 		filtered_summary_plot_objects.append(filtered_cell_per_amp_obj)
 
 	#
-	filtered_amp_per_cell_obj = amp_per_cell_filtered(parsed_information, output_root, cell_quality_to_analyze)
+	filtered_amp_per_cell_obj = amp_per_cell_filtered(filtered_parsed_information, output_root, cell_quality_to_analyze)
 	if filtered_amp_per_cell_obj is not None:
 		filtered_summary_plot_objects.append(filtered_amp_per_cell_obj)
 
 	#
-	filtered_mod_pct_plot_obj = mod_per_amp_filtered(parsed_information, output_root, cell_quality_to_analyze)
+	filtered_mod_pct_plot_obj = mod_per_amp_filtered(filtered_parsed_information, output_root, cell_quality_to_analyze)
 	if filtered_mod_pct_plot_obj is not None:
 		filtered_summary_plot_objects.append(filtered_mod_pct_plot_obj)
 
@@ -611,7 +812,7 @@ def generate_amplicon_coverage_plot(output_root, cell_quality_to_analyze):
 
 
 	editing = editing[editing.index.isin(valid_barcodes)]
-	editingSummary_count = editing.filter(like = "totCount")
+	editingSummary_count = _numeric_tot_count_columns(editing)
 	
 	amplicon_column_sum = editingSummary_count.sum(axis = 0) / len(editingSummary_count)
 	amplicon_column_sum_sorted = amplicon_column_sum.sort_values(ascending = False)
@@ -730,8 +931,8 @@ def generate_read_depth_boxplots(output_root, cell_quality_to_analyze):
 	high_barcodes = classified_barcodes[classified_barcodes['Color'].isin(high_colors)].index
 	low_barcodes = classified_barcodes[classified_barcodes['Color'].isin(low_colors)].index
 
-	high_totals = editing[editing.index.isin(high_barcodes)].filter(like="totCount").sum(axis=1)
-	low_totals = editing[editing.index.isin(low_barcodes)].filter(like="totCount").sum(axis=1)
+	high_totals = _numeric_tot_count_columns(editing[editing.index.isin(high_barcodes)]).sum(axis=1)
+	low_totals = _numeric_tot_count_columns(editing[editing.index.isin(low_barcodes)]).sum(axis=1)
 
 	plot_df = pd.concat([
 		pd.DataFrame({"Read Count": high_totals, "Barcode Quality": "High"}),
@@ -833,8 +1034,8 @@ def generate_cell_coverage_plot(output_root, cell_quality_to_analyze):
 	high_barcodes = classified_barcodes[classified_barcodes['Color'].isin(high_colors)].index
 	low_barcodes = classified_barcodes[classified_barcodes['Color'].isin(low_colors)].index
 
-	high_qual_edit = editing[editing.index.isin(high_barcodes)].filter(like="totCount")
-	low_qual_edit = editing[editing.index.isin(low_barcodes)].filter(like="totCount")
+	high_qual_edit = _numeric_tot_count_columns(editing[editing.index.isin(high_barcodes)])
+	low_qual_edit = _numeric_tot_count_columns(editing[editing.index.isin(low_barcodes)])
 	
 	# Calculate read count average in high quality barcodes
 	high_qual_sum = high_qual_edit.sum(axis = 1)
@@ -926,19 +1127,22 @@ def generate_edit_histogram(output_root, cell_quality_to_analyze):
 	"""
 	plt.clf()
 	plt.cla()
-	# Read in editingSummary file
-	editing = pd.read_csv(output_root + ".editingSummary.txt", sep = "\t", index_col = 0) 
+	# Read in the final filtered editingSummary file
+	editing = pd.read_csv(output_root + ".filteredEditingSummary.txt", sep = "\t", index_col = 0)
 	# Read in amplicon score file
 	amplicon = pd.read_csv(output_root + ".amplicon_score.txt", sep = "\t", index_col = 0)
 	
 	barcodes = amplicon[amplicon['Color'].isin(cell_quality_to_analyze)].index.tolist()
 	editing = editing[editing.index.isin(barcodes)]
 		
-	editing = editing.filter(like = "modPct")
+	editing = _numeric_mod_pct_columns(editing)
 	
 	editing = editing > 0
 	
 	row_sum = editing.sum(axis = 1)
+	if row_sum.empty:
+		logging.warning("Skipping edit histogram because no selected cells were found")
+		return None
 	
 	# Calculate the bin edges
 	bin_edges = [x - 0.5 for x in range(0, max(row_sum) + 2)]
@@ -962,7 +1166,7 @@ def generate_edit_histogram(output_root, cell_quality_to_analyze):
 			plot_title = 'Editing Count Histogram',
 			plot_label = 'A histogram that displays the number of edited sites in each barcode.',
 			plot_datas = [
-				("Modification Percentages (modPct)", output_root + ".editingSummary.txt"),
+				("Filtered modification percentages (modPct)", output_root + ".filteredEditingSummary.txt"),
 				("Filtered cell barcodes", output_root + ".amplicon_score.txt")
 				]
 			)
@@ -1022,27 +1226,23 @@ def generate_upset_plot(output_root, cell_quality_to_analyze):
 	"""
 	plt.clf()
 	plt.cla() 
-	# Read in editingSummary file
-	editing = pd.read_csv(output_root + ".editingSummary.txt", sep = "\t", index_col = 0) 
+	# Read in the final filtered editingSummary file
+	editing = pd.read_csv(output_root + ".filteredEditingSummary.txt", sep = "\t", index_col = 0)
 	# Read in amplicon score file
 	amplicon = pd.read_csv(output_root + ".amplicon_score.txt", sep = "\t", index_col = 0)
 	
 	# Filter barcodes if required 
-	#if filtered:
-	#    barcodes = amplicon[amplicon['Color'].isin(["High Score / High Reads", "High Score / Low Reads"])].index.tolist()
-	#    editing = editing[editing.index.isin(barcodes)]
 	barcodes = amplicon[amplicon['Color'].isin(cell_quality_to_analyze)].index.tolist()
 	editing = editing[editing.index.isin(barcodes)]
 	
-	#high_qual = amplicon[amplicon['Color'].isin(cell_quality_to_analyze)]
  
 	# Reduce to modified columns
-	editing = editing.filter(like = "modPct") 
+	editing = _numeric_mod_pct_columns(editing) 
 	editing.columns = editing.columns.str.replace('modPct.', '')
 	editing.fillna(0,inplace=True)
 	
 	# Convert to a boolean matrix
-	editing = editing.applymap(lambda x: False if x == 0 else True)
+	editing = editing != 0
 	
 	# Find top 5 combinations of edit values
 	counts = editing.apply(tuple, axis = 1).value_counts()
@@ -1054,13 +1254,14 @@ def generate_upset_plot(output_root, cell_quality_to_analyze):
 	# Remove columns where all modification values == False
 	editing = editing.loc[:, ~(editing == False).all()] 
 	
-	first = True
-	for col in editing.columns:
-		if first:
-			editing = editing.set_index(editing[col] > 0)
-			first = False
-		else:
-			editing = editing.set_index(editing[col] > 0, append = True)
+	if editing.shape[1] == 0:
+		logging.warning("Skipping edit combination upset plot because no edited sites were found")
+		return None
+	if editing.shape[1] == 1:
+		logging.warning("Skipping edit combination upset plot because only one edited site was found")
+		return None
+
+	editing.index = pd.MultiIndex.from_frame(editing.astype(bool))
 	
 	upset = UpSet(editing, orientation = "horizontal", sort_by = "cardinality", show_counts = True)
 	
@@ -1083,7 +1284,7 @@ def generate_upset_plot(output_root, cell_quality_to_analyze):
 			plot_title = 'Editing Sites and Intersections',
 			plot_label = 'An upset plot that displays the most common edits and edit combinations.',
 			plot_datas = [
-				("Modification Percentages (modPct)", output_root + ".editingSummary.txt"),
+				("Filtered modification percentages (modPct)", output_root + ".filteredEditingSummary.txt"),
 				("Filtered cell barcodes", output_root + ".amplicon_score.txt"),
 				]
 			)
@@ -1475,6 +1676,10 @@ def parse_settings(args):
 			write_h5ad : bool,
 			h5ad_output : str,
 			h5ad_export_config : dict,
+			debug_rescued_reads_bam : str,
+			debug_rejected_rescue_reads_bam : str,
+			debug_require_strict_amplicon_alignment : bool,
+			partial_rescue_min_mean_read_quality : float,
 			settings_file : str
 		)
 
@@ -1503,13 +1708,12 @@ def parse_settings(args):
 	# First argument passed on command line is the settings file #
 	settings_file = sys.argv[1]
 	settings_file = os.path.abspath(settings_file)
-	settings = {}
+	settings_dir = os.path.dirname(settings_file)
 	
 	# Checking if a debug parameter has been provided to the function call #
 	logging_level = logging.INFO
 	if len(args) > 2 and 'debug' in args[2].lower():
 		logging_level=logging.DEBUG
-		settings['debug'] = True
 
 	# Settings up logging formatting and parameters
 	log_formatter = logging.Formatter("%(asctime)s:%(levelname)s: %(message)s")
@@ -1529,20 +1733,12 @@ def parse_settings(args):
 	logging.info('Parsing settings file..')
 
 	# Parse the settings file and write to a dictionary {key '\t' value}
-	with open(settings_file,'r') as sin:
-		for line in sin:
-			line = line.strip()
-			if line.startswith("#"):
-				continue
-			if line == "":
-				continue
-			(key,value) = line.split("\t")
-			settings[key] = value
+	settings = _parse_settings_file(settings_file)
 
 	# Checking for various required settings and raising exceptions for missing values
 	if 'r1' not in settings:
 		raise Exception('Settings file must contain an entry for r1')
-	r1 = settings['r1'].strip()
+	r1 = _resolve_settings_path_list(settings['r1'], settings_dir)
 	# Verifying that all of the read files exist
 	for r1_file in r1.split(","):
 		if not os.path.isfile(r1_file):
@@ -1551,7 +1747,7 @@ def parse_settings(args):
 	# Same as above for r1
 	if 'r2' not in settings:
 		raise Exception('Settings file must contain an entry for r2')
-	r2 = settings['r2'].strip()
+	r2 = _resolve_settings_path_list(settings['r2'], settings_dir)
 	for r2_file in r2.split(","):
 		if not os.path.isfile(r2_file):
 			raise Exception('Input r2 ' + r2_file + ' does not exist')
@@ -1566,14 +1762,12 @@ def parse_settings(args):
 		raise Exception('Settings file must contain an entry for constant2')
 	constant2 = settings['constant2'].strip()
 
-	allow_barcode_mismatches = False
-	if 'allowBarcodeMismatches' in settings:
-		allow_barcode_mismatches = True
+	allow_barcode_mismatches = _parse_bool_setting(settings, 'allowBarcodeMismatches', default=False)
 
 	# Checking for inclusion and existence of a barcode file
 	if 'barcodes' not in settings:
 		raise Exception('Settings file must contain an entry for barcodes')
-	barcode_file = settings['barcodes'].strip()
+	barcode_file = _resolve_settings_path(settings['barcodes'], settings_dir)
 	if not os.path.isfile(barcode_file):
 		raise Exception('Barcode file ' + barcode_file + ' does not exist')
 
@@ -1581,19 +1775,25 @@ def parse_settings(args):
 	# Checking for existence and inclusion of an amplicon file
 	if 'amplicons' not in settings:
 		raise Exception('Settings file must contain an entry for amplicons')
-	amplicon_file = os.path.abspath(settings['amplicons'])
+	amplicon_file = _resolve_settings_path(settings['amplicons'], settings_dir)
 	if not os.path.isfile(amplicon_file):
 		raise Exception('Amplicon file does not exist at ' + amplicon_file)
 
 	# Settings primer lookup length
-	primer_lookup_len = 18
 	if 'primerLookupLen' in settings:
-		primer_lookup_len = int(settings['primer_lookup_len'])
+		raise ValueError("primerLookupLen is no longer supported. Use primer_lookup_len instead.")
+	primer_lookup_len = _parse_int_setting(settings, 'primer_lookup_len', 18, minimum=1)
 
 	# Settings adapter DNA seq
 	adapter_DNA = "TGTCTCTTATACACATCTCCGAGCCCACGAG"
-	if 'plamsid_DNA' in settings:
-		adapter_DNA = settings['adapter_DNA']
+	if 'adapter_DNA' in settings:
+		adapter_DNA = settings['adapter_DNA'].strip()
+	else:
+		for legacy_key in ('plamsid_DNA', 'plasmid_DNA'):
+			if legacy_key in settings:
+				adapter_DNA = settings[legacy_key].strip()
+				logging.warning("%s is deprecated; use adapter_DNA instead.", legacy_key)
+				break
 
 	n_processes = mp.cpu_count()
 	if 'processes' in settings and settings['processes'] != 'max':
@@ -1601,41 +1801,23 @@ def parse_settings(args):
 	if not n_processes or n_processes < 1:
 		raise ValueError("n_processes must be >= 1")
 
-	keep_intermediate_files = False
-	if 'keep_intermediate_files' in settings and settings['keep_intermediate_files'].lower() == 'true':
-		keep_intermediate_files = True
+	keep_intermediate_files = _parse_bool_setting(settings, 'keep_intermediate_files', default=False)
 
-	ignore_substitutions = False
-	if 'ignore_substitutions' in settings and settings['ignore_substitutions'].lower() == 'true':
-		ignore_substitutions = True
+	ignore_substitutions = _parse_bool_setting(settings, 'ignore_substitutions', default=False)
 
-	assign_reads_to_all_possible_amplicons = False # Default behavior is NOT permissive
-	if 'assign_reads_to_all_possible_amplicons' in settings and settings['assign_reads_to_all_possible_amplicons'].lower() == 'true':
-		assign_reads_to_all_possible_amplicons = True
+	assign_reads_to_all_possible_amplicons = _parse_bool_setting(settings, 'assign_reads_to_all_possible_amplicons', default=False)
 
-	suppress_sub_crispresso_plots = False
-	if 'suppress_sub_crispresso_plots' in settings and settings['suppress_sub_crispresso_plots'].lower() == 'true':
-		suppress_sub_crispresso_plots = True
+	debug_require_strict_amplicon_alignment = _parse_bool_setting(settings, 'debug_require_strict_amplicon_alignment', default=False)
+	if assign_reads_to_all_possible_amplicons and debug_require_strict_amplicon_alignment:
+		raise ValueError("debug_require_strict_amplicon_alignment cannot be used with assign_reads_to_all_possible_amplicons")
 
-	write_h5ad = True
-	if 'write_h5ad' in settings:
-		write_h5ad = settings['write_h5ad'].strip().lower() == 'true'
+	suppress_sub_crispresso_plots = _parse_bool_setting(settings, 'suppress_sub_crispresso_plots', default=False)
+
+	write_h5ad = _parse_bool_setting(settings, 'write_h5ad', default=True)
 	
 	# --- normalized cutoffs (use canonical defaults and validate) ---
-	try:
-		# read user-provided values but store in canonical internal names
-		min_total_reads_per_barcode = int(settings.get('min_total_reads_per_barcode', MIN_TOTAL_READS_PER_BARCODE_DEFAULT))
-		if min_total_reads_per_barcode < 0:
-			raise ValueError("min_total_reads_per_barcode must be >= 0")
-	except Exception as e:
-		raise ValueError(f"Invalid min_total_reads_per_barcode: {e}")
-
-	try:
-		min_reads_per_amplicon_per_cell = int(settings.get('min_reads_per_amplicon_per_cell', MIN_READS_PER_AMPLICON_PER_CELL_DEFAULT))
-		if min_reads_per_amplicon_per_cell < 0:
-			raise ValueError("min_reads_per_amplicon_per_cell must be >= 0")
-	except Exception as e:
-		raise ValueError(f"Invalid min_reads_per_amplicon_per_cell: {e}")
+	min_total_reads_per_barcode = _parse_int_setting(settings, 'min_total_reads_per_barcode', MIN_TOTAL_READS_PER_BARCODE_DEFAULT, minimum=0)
+	min_reads_per_amplicon_per_cell = _parse_int_setting(settings, 'min_reads_per_amplicon_per_cell', MIN_READS_PER_AMPLICON_PER_CELL_DEFAULT, minimum=0)
 	
 	# --- parse cell-quality selection (explicit booleans, depth-only terminology) ---
 
@@ -1651,16 +1833,8 @@ def parse_settings(args):
 
 	for key, code in _cell_quality_flag_map.items():
 		if key in settings:
-			val = settings[key].strip().lower()
-			if val == "true":
+			if _parse_bool_setting(settings, key):
 				cell_quality_to_analyze.add(code)
-			elif val == "false":
-				pass  # explicitly excluded
-			else:
-				raise ValueError(
-					f"Invalid value for {key}: '{settings[key]}'. "
-					"Expected True or False."
-				)
 
 	# Default behavior if user specifies none explicitly:
 	# Include High_score_High_depth only
@@ -1675,16 +1849,16 @@ def parse_settings(args):
 		# .bt2 / .bt21 are the index files generated by bowtie2-build
 	bowtie2_index = ""
 	if 'bowtie2_index' in settings:
-		bowtie2_index = settings['bowtie2_index'].replace(".fa","")
+		bowtie2_index = _resolve_settings_path(settings['bowtie2_index'].replace(".fa",""), settings_dir)
 	if 'genome' in settings:
-		bowtie2_index = settings['genome'].replace(".fa","")
+		bowtie2_index = _resolve_settings_path(settings['genome'].replace(".fa",""), settings_dir)
 	if not os.path.isfile(bowtie2_index+".1.bt2") and not os.path.isfile(bowtie2_index+".1.bt2l"):
 		raise Exception('bowtie2_index file does not exist at ' + bowtie2_index + ".bt2 or " + bowtie2_index + ".bt2l")
 
 	# Checking for existence and inclusion of an alternate alleles file
 	alt_alleles_file = ""
 	if 'alt_alleles_file' in settings:
-		alt_alleles_file = settings['alt_alleles_file']
+		alt_alleles_file = _resolve_settings_path(settings['alt_alleles_file'], settings_dir)
 		if not os.path.isfile(alt_alleles_file):
 			raise Exception('Alt alleles file does not exist at ' + alt_alleles_file)
 
@@ -1692,11 +1866,38 @@ def parse_settings(args):
 		# if not provided, an suffix is appended onto the settings file name
 	output_root = settings_file
 	if 'output_root' in settings:
-		output_root = settings['output_root']
+		output_root = _resolve_settings_path(settings['output_root'], settings_dir)
 
 	h5ad_output = output_root + ".h5ad"
 	if 'h5ad_output' in settings:
-		h5ad_output = settings['h5ad_output']
+		h5ad_output = _resolve_settings_path(settings['h5ad_output'], settings_dir)
+
+	debug_rescued_reads_bam = ""
+	if 'debug_rescued_reads_bam' in settings:
+		debug_rescued_reads_bam = settings['debug_rescued_reads_bam'].strip()
+		if debug_rescued_reads_bam.lower() in ("true", "yes", "1"):
+			debug_rescued_reads_bam = output_root + ".splitReads.rescued.bam"
+		elif debug_rescued_reads_bam.lower() in ("false", "no", "0", "none"):
+			debug_rescued_reads_bam = ""
+		elif _settings_value_is_path(debug_rescued_reads_bam):
+			debug_rescued_reads_bam = _resolve_settings_path(debug_rescued_reads_bam, settings_dir)
+
+	debug_rejected_rescue_reads_bam = ""
+	if 'debug_rejected_rescue_reads_bam' in settings:
+		debug_rejected_rescue_reads_bam = settings['debug_rejected_rescue_reads_bam'].strip()
+		if debug_rejected_rescue_reads_bam.lower() in ("true", "yes", "1"):
+			debug_rejected_rescue_reads_bam = output_root + ".splitReads.rejected_rescue_candidates.bam"
+		elif debug_rejected_rescue_reads_bam.lower() in ("false", "no", "0", "none"):
+			debug_rejected_rescue_reads_bam = ""
+		elif _settings_value_is_path(debug_rejected_rescue_reads_bam):
+			debug_rejected_rescue_reads_bam = _resolve_settings_path(debug_rejected_rescue_reads_bam, settings_dir)
+
+	partial_rescue_min_mean_read_quality = _parse_float_setting(
+		settings,
+		'partial_rescue_min_mean_read_quality',
+		PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT,
+		minimum=0,
+	)
 
 	h5ad_zygosity = {}
 	for key, default in H5AD_ZYGOSITY_DEFAULTS.items():
@@ -1716,28 +1917,28 @@ def parse_settings(args):
 	# Generating amplicon output directory if it does not exist
 	amp_file_dir = output_root + ".seq_by_amplicon"
 	if not os.path.isdir(amp_file_dir):
-		os.mkdir(amp_file_dir)
+		os.makedirs(amp_file_dir, exist_ok=True)
 
 	crispresso_dir = output_root + ".crispresso"
 	if not os.path.isdir(crispresso_dir):
-		os.mkdir(crispresso_dir)
+		os.makedirs(crispresso_dir, exist_ok=True)
 
 
 	#check software
 	#check bowtie2
 	try:
-		bowtie_result = sb.check_output('bowtie2 --version', stderr=sb.STDOUT,shell=True)
+		bowtie_result = sb.check_output(['bowtie2', '--version'], stderr=sb.STDOUT)
 	except Exception:
 		raise Exception('Error: bowtie2 is required')
 
 	#check crispresso
 	try:
-		crispresso_result = sb.check_output('CRISPResso --version', stderr=sb.STDOUT,shell=True)
+		crispresso_result = sb.check_output(['CRISPResso', '--version'], stderr=sb.STDOUT)
 	except Exception:
 		raise Exception('Error: CRISPResso2 is required')
 
 
-	return (r1, r2, constant1, constant2, allow_barcode_mismatches,barcode_file, amplicon_file, primer_lookup_len, adapter_DNA, amp_file_dir, alt_alleles_file, bowtie2_index, crispresso_dir, output_root, n_processes, keep_intermediate_files, ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze, write_h5ad, h5ad_output, h5ad_export_config, settings_file)
+	return (r1, r2, constant1, constant2, allow_barcode_mismatches,barcode_file, amplicon_file, primer_lookup_len, adapter_DNA, amp_file_dir, alt_alleles_file, bowtie2_index, crispresso_dir, output_root, n_processes, keep_intermediate_files, ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze, write_h5ad, h5ad_output, h5ad_export_config, debug_rescued_reads_bam, debug_rejected_rescue_reads_bam, debug_require_strict_amplicon_alignment, partial_rescue_min_mean_read_quality, settings_file)
 
 
 def write_h5ad_output(output_root, settings_file, h5ad_output=None, h5ad_export_config=None, n_processes=None):
@@ -2311,8 +2512,25 @@ def run_alignment(args):
 	- Intended for multiprocessing execution.
 	"""
 	r1_path, r2_path, bowtie2_index, threads, out_name = args
-	align_cmd = f'bowtie2 -x {bowtie2_index} -p {threads} -1 {r1_path} -2 {r2_path} 2>>{out_name}.bowtie2.log | samtools view -bS - > {out_name}'
-	run_command(align_cmd)
+	log_file = out_name + ".bowtie2.log"
+	bowtie_cmd = ["bowtie2", "-x", bowtie2_index, "-p", str(threads), "-1", r1_path, "-2", r2_path]
+	samtools_cmd = ["samtools", "view", "-bS", "-"]
+	logging.debug("running: %s | %s", _command_to_string(bowtie_cmd), _command_to_string(samtools_cmd))
+	with open(log_file, "a") as bowtie_log, open(out_name, "wb") as bam_out:
+		bowtie_proc = sb.Popen(bowtie_cmd, stdout=sb.PIPE, stderr=bowtie_log)
+		samtools_proc = sb.Popen(samtools_cmd, stdin=bowtie_proc.stdout, stdout=bam_out, stderr=sb.PIPE)
+		bowtie_proc.stdout.close()
+		_, samtools_stderr = samtools_proc.communicate()
+		bowtie_return = bowtie_proc.wait()
+		if bowtie_return != 0:
+			_raise_command_error(bowtie_cmd, bowtie_return, context=f"see {log_file}")
+		if samtools_proc.returncode != 0:
+			_raise_command_error(
+				samtools_cmd,
+				samtools_proc.returncode,
+				context=f"creating {out_name}",
+				stderr=samtools_stderr.decode(errors="replace") if samtools_stderr else None,
+			)
 
 def parse_and_align_reads(r1_fastqs,r2_fastqs,constant1,constant2,
 						  output_root,barcode_file,allow_barcode_mismatches,
@@ -2448,11 +2666,11 @@ def parse_and_align_reads(r1_fastqs,r2_fastqs,constant1,constant2,
 
 	# Check for multiple parsed_results
 	if len(parsed_results) > 1: 
-		input_bams = " ".join(result[2] for result in parsed_results)
+		input_bams = [result[2] for result in parsed_results]
 		#inter_bam = output_root+".merged.bam"
 		inter_bam = build_stage_filename(STAGE_ALIGN, "intermediate_merged", ext="bam", output_root=output_root)
 		start_bam_cat = time.time()
-		run_command(f"samtools cat -o {inter_bam} {input_bams}")
+		run_command(["samtools", "cat", "-o", inter_bam] + input_bams)
 		end_bam_cat = time.time() - start_bam_cat
 		logging.info("BAM cat ended in %.3f seconds", end_bam_cat)
 		logging.info("Inside parsed_results > 1")
@@ -2461,7 +2679,7 @@ def parse_and_align_reads(r1_fastqs,r2_fastqs,constant1,constant2,
 		logging.info("Inside parsed_results == 1")
 
 	bam_threads = min(12, n_processes)
-	sort_bam_cmd = f'samtools sort -n -@ {bam_threads} -o {aligned_bam} {inter_bam}'
+	sort_bam_cmd = ["samtools", "sort", "-n", "-@", str(bam_threads), "-o", aligned_bam, inter_bam]
 		 
 	start_bam_sort = time.time() 
 	run_command(sort_bam_cmd)
@@ -2499,6 +2717,8 @@ def parse_and_align_reads(r1_fastqs,r2_fastqs,constant1,constant2,
 
 
 def alignment_end(pos, cigar):
+	if cigar == "*" or cigar is None:
+		return pos
 	ref_len = 0
 	for length, op in re.findall(r'(\d+)([MIDNSHP=X])', cigar):
 		length = int(length)
@@ -2507,8 +2727,158 @@ def alignment_end(pos, cigar):
 	return pos + ref_len - 1
 
 
+def mean_phred_quality(qual_string):
+	"""
+	Return the mean Phred+33 base quality for one SAM quality string.
+	"""
+	if qual_string is None:
+		return None
+	qual_string = qual_string.strip()
+	if qual_string == "" or qual_string == "*":
+		return None
+	return sum(ord(ch) - 33 for ch in qual_string) / len(qual_string)
 
-def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_file,primer_lookup_len,amp_file_dir,bowtie2_index,adapter_DNA,n_processes,keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons=False):
+
+def alignment_boundary_key(read_chr, read_start0, cigar, is_reverse):
+	"""
+	Return the inward-facing amplicon-boundary key supported by an alignment.
+
+	Forward-strand reads support the amplicon start boundary. Reverse-strand
+	reads support the amplicon end boundary. Outward-facing boundary hits are
+	therefore ignored by construction.
+	"""
+	if read_chr in (None, "", "*") or cigar in (None, "*") or read_start0 is None:
+		return None
+	read_pos = alignment_end(read_start0, cigar) if is_reverse else read_start0
+	return read_chr + ":" + str(read_pos)
+
+
+def inward_alignment_amplicon(read_chr, read_start0, cigar, is_reverse, start_lookup, end_lookup):
+	"""
+	Call an amplicon from an inward-facing alignment boundary, or NA.
+	"""
+	key = alignment_boundary_key(read_chr, read_start0, cigar, is_reverse)
+	if key is None:
+		return "NA"
+	if is_reverse:
+		return end_lookup.get(key, "NA")
+	return start_lookup.get(key, "NA")
+
+
+def _open_rescued_reads_writer(aligned_bam, rescued_reads_path):
+	"""
+	Open a SAM/BAM writer for read pairs accepted by partial alignment rescue.
+	"""
+	if not rescued_reads_path:
+		return (None, None)
+
+	safe_write_path(rescued_reads_path)
+	header = sb.check_output(
+		["samtools", "view", "-H", aligned_bam],
+		universal_newlines=True,
+	)
+
+	if rescued_reads_path.lower().endswith(".sam"):
+		writer = open(rescued_reads_path, "w")
+		writer.write(header)
+		return (writer, None)
+
+	proc = sb.Popen(
+		["samtools", "view", "-b", "-h", "-o", rescued_reads_path, "-"],
+		stdin=sb.PIPE,
+		universal_newlines=True,
+	)
+	proc.stdin.write(header)
+	return (proc.stdin, proc)
+
+
+def _close_rescued_reads_writer(writer, proc, rescued_reads_path):
+	"""
+	Close the rescued-read SAM/BAM writer and verify samtools completed.
+	"""
+	if writer is None:
+		return
+
+	writer.close()
+	if proc is not None:
+		return_code = proc.wait()
+		if return_code != 0:
+			raise Exception(
+				"samtools failed while writing rescued read BAM "
+				+ rescued_reads_path
+			)
+
+
+def _quality_is_below_threshold(mean_quality, min_mean_quality):
+	if mean_quality is None:
+		return False
+	try:
+		if np.isnan(mean_quality):
+			return False
+	except TypeError:
+		pass
+	return mean_quality < min_mean_quality
+
+
+def _classify_amplicon_assignment(
+	amp1,
+	amp2,
+	amp1_aln,
+	amp2_aln,
+	require_strict_amplicon_alignment=False,
+	r1_mean_quality=None,
+	r2_mean_quality=None,
+	partial_rescue_min_mean_read_quality=PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT,
+):
+	"""
+	Classify one read-pair amplicon assignment from primer and alignment calls.
+	"""
+	result = {
+		"accepted_amplicon": None,
+		"rescued_by_partial_alignment": False,
+		"would_rescue_under_strict": False,
+		"reject_reason": None,
+	}
+
+	if amp1 != amp2 or amp1 == "NA":
+		result["reject_reason"] = "primer_disagreement_or_missing"
+		return result
+
+	alignment_calls = [x for x in (amp1_aln, amp2_aln) if x != "NA"]
+	if any(x != amp1 for x in alignment_calls):
+		result["reject_reason"] = "contradictory_alignment"
+		return result
+
+	if not alignment_calls:
+		result["reject_reason"] = "no_inward_boundary_support"
+		return result
+
+	current_rescue_used = len(alignment_calls) < 2
+	if current_rescue_used and partial_rescue_min_mean_read_quality is not None:
+		if (
+			_quality_is_below_threshold(r1_mean_quality, partial_rescue_min_mean_read_quality)
+			or _quality_is_below_threshold(r2_mean_quality, partial_rescue_min_mean_read_quality)
+		):
+			result["reject_reason"] = "low_mean_quality"
+			return result
+
+	if require_strict_amplicon_alignment:
+		strict_amplicon = None
+		if amp1 == amp2 == amp1_aln == amp2_aln and amp1 != "NA":
+			strict_amplicon = amp1
+		result["accepted_amplicon"] = strict_amplicon
+		result["would_rescue_under_strict"] = current_rescue_used and strict_amplicon is None
+		if strict_amplicon is None:
+			result["reject_reason"] = "strict_alignment_required"
+		return result
+
+	result["accepted_amplicon"] = amp1
+	result["rescued_by_partial_alignment"] = current_rescue_used
+	return result
+
+
+
+def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_file,primer_lookup_len,amp_file_dir,bowtie2_index,adapter_DNA,n_processes,keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons=False, debug_rescued_reads_bam="", debug_require_strict_amplicon_alignment=False, debug_rejected_rescue_reads_bam="", partial_rescue_min_mean_read_quality=PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT):
 	"""
 	Split reads from a name-sorted aligned BAM into per-amplicon FASTQ files.
 
@@ -2516,7 +2886,8 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	----------------
 	- Build primer lookup tables and optionally align amplicons to the genome.
 	- Iterate through the name-sorted BAM and assign each read pair to one or
-	  more amplicons based on primer matches and alignment position.
+	  more amplicons based on primer matches and inward-facing amplicon-boundary
+	  alignment support.
 	- Write per-amplicon R1/R2 FASTQ files and an amplicon info file used to
 	  accelerate re-runs.
 	- Uses `reads_per_cell` (barcode -> read count) as input for optional filtering
@@ -2551,6 +2922,19 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	assign_reads_to_all_possible_amplicons : bool
 		If True, assign a read to every amplicon it plausibly matches;
 		otherwise pick a single best amplicon.
+	debug_rescued_reads_bam : str
+		Optional path to write read pairs accepted by partial alignment rescue.
+		Use a .sam suffix for SAM output; any other suffix writes BAM.
+	debug_require_strict_amplicon_alignment : bool
+		If True, disable partial-alignment rescue and require both primer calls
+		and both alignment-side calls to agree on the same amplicon.
+	debug_rejected_rescue_reads_bam : str
+		Optional path to write primer-agreeing rescue candidates rejected by the
+		quality gate, contradictory alignment evidence, or missing inward
+		boundary support.
+	partial_rescue_min_mean_read_quality : float
+		Minimum mean Phred quality required for each mate in partial rescues.
+		Fully alignment-supported assignments are not gated by this setting.
 
 	Returns
 	-------
@@ -2565,42 +2949,16 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	- Assignment heuristics are documented in the code near the primer match logic;
 	  keep those comments in sync with this docstring if you change heuristics.
 	"""
+	if assign_reads_to_all_possible_amplicons and debug_require_strict_amplicon_alignment:
+		raise ValueError("debug_require_strict_amplicon_alignment cannot be used with assign_reads_to_all_possible_amplicons")
+
 	info_file = output_root+".splitReads.ampliconInfo.txt"
 	if os.path.isfile(info_file):
-		with open(info_file,'r') as fin:
-			head = fin.readline().strip()
-			head_els = head.split("\t")
-			amplicon_names = []
-			amplicon_information = {}
-			for line in fin:
-				line_els = line.strip().split("\t")
-				amp_info = dict(zip(head_els,line_els))
-				amp_name = line_els[0]
-				if 'reads_r1_file' not in amp_info or amp_info['reads_r1_file'] in ('', 'NA'):
-					#amp_info['reads_r1_file'] = os.path.join(amp_file_dir, amp_name + '.r1.fq')
-					amp_info['reads_r1_file'] = build_stage_filename(
-				stage=STAGE_SPLIT,
-				tag="reads_all_cells",
-				amplicon=amp_name,
-				read="r1",
-				ext="fq",
-				output_root=amp_file_dir,
-			)
-				if 'reads_r2_file' not in amp_info or amp_info['reads_r2_file'] in ('', 'NA'):
-					#amp_info['reads_r2_file'] = os.path.join(amp_file_dir, amp_name + '.r2.fq')
-					amp_info['reads_r2_file'] = build_stage_filename(
-				stage=STAGE_SPLIT,
-				tag="reads_all_cells",
-				amplicon=amp_name,
-				read="r2",
-				ext="fq",
-				output_root=amp_file_dir,
-			)
-				amplicon_information[amp_name] = amp_info
-				amplicon_names.append(amp_name)
-
-		logging.info ("Finished splitting reads")
-		return amplicon_names,amplicon_information,info_file
+		cache_is_valid, amplicon_names, amplicon_information = _load_split_read_cache(info_file, amp_file_dir)
+		if cache_is_valid:
+			logging.info ("Finished splitting reads")
+			return amplicon_names,amplicon_information,info_file
+		os.remove(info_file)
 
 	logging.info("Splitting reads to amplicons..")
 
@@ -2666,10 +3024,13 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	#align amplicons to genome
 	bowtie2_log = output_root+".amplicons.alignReads.log"
 	aligned_amps_file = output_root + ".amplicons.aligned.sam"
-	align_command = 'bowtie2 -k 2 -x %s -p %s -f -U %s 2>>%s > %s'%(bowtie2_index,n_processes,amplicon_fasta_file,bowtie2_log,aligned_amps_file)
+	align_command = ["bowtie2", "-k", "2", "-x", bowtie2_index, "-p", str(n_processes), "-f", "-U", amplicon_fasta_file]
 	with open(bowtie2_log,'w') as bt2log:
-		bt2log.write(align_command)
-	run_command(align_command)
+		bt2log.write(_command_to_string(align_command) + "\n")
+		with open(aligned_amps_file, "w") as aligned_amps:
+			completed = sb.run(align_command, stdout=aligned_amps, stderr=bt2log)
+	if completed.returncode != 0:
+		_raise_command_error(align_command, completed.returncode, context=f"see {bowtie2_log}")
 
 	#genome_amplicon_locs = {}#chr,start -> amplicon
 	start_amplicon_locs = {}# chr,start -> amplicon
@@ -2743,8 +3104,18 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	unidentified_reads_count = 0 #primers not match location or primers not match each other
 	aligned_other_loc_reads_count = 0 # reads that have primers for an amplicon but are aligned to another location
 	partial_alignment_rescue_count = 0 # primers agreed and one alignment-side check supported the amplicon with no contradiction
+	would_rescue_strict_alignment_count = 0 # strict debug mode only: reads rejected that current rescue would have accepted
+	rejected_rescue_low_quality_count = 0
+	rejected_rescue_contradictory_alignment_count = 0
+	rejected_rescue_no_inward_boundary_support_count = 0
 	unmapped_reads_count = 0 #unmapped by bowtie
-	bam_iter = get_command_output('samtools view %s'%(aligned_bam))#read in the aligned bam file
+	bam_iter = get_command_output(["samtools", "view", aligned_bam])#read in the aligned bam file
+	rescued_reads_writer, rescued_reads_proc = _open_rescued_reads_writer(aligned_bam, debug_rescued_reads_bam)
+	if debug_rescued_reads_bam:
+		logging.info("Writing partial-alignment rescued reads to " + debug_rescued_reads_bam)
+	rejected_rescue_reads_writer, rejected_rescue_reads_proc = _open_rescued_reads_writer(aligned_bam, debug_rejected_rescue_reads_bam)
+	if debug_rejected_rescue_reads_bam:
+		logging.info("Writing rejected rescue candidate reads to " + debug_rejected_rescue_reads_bam)
 	count = 0
 
 	# set to keep track of failed cells
@@ -2815,18 +3186,14 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 			
 		seq1_to_write = seq1
 		primer1 = seq1[0:primer_lookup_len]
-		key1 = line1_chr + ":" + str(line1_start)
 		if line1_rc:
 			primer1 = seq1[(-1*primer_lookup_len):]
-			key1 = line1_chr + ":" + str(alignment_end(line1_start, line1_cigar))
 			seq1_to_write = reverse_complement(seq1)
 
 		seq2_to_write = seq2
 		primer2 = seq2[0:primer_lookup_len]
-		key2 = line2_chr + ":" + str(line2_start)
 		if line2_rc:
 			primer2 = seq2[(-1*primer_lookup_len):]#after alignment, all reads are put on the forward strand so we don't need to reverse complement them
-			key2 = line2_chr + ":" + str(alignment_end(line2_start, line2_cigar))
 			seq2_to_write = reverse_complement(seq2)
 
 
@@ -2836,12 +3203,22 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 			amp1 = primer_seqs[primer1]
 		if primer2 in primer_seqs:
 			amp2 = primer_seqs[primer2]
-		amp1_aln = "NA"
-		amp2_aln = "NA"
-		if key1 in start_amplicon_locs: # start_amplicon_locs[ChrN:10000000] = amp_name
-			amp1_aln = start_amplicon_locs[key1]
-		if key2 in end_amplicon_locs:
-			amp2_aln = end_amplicon_locs[key2]
+		amp1_aln = inward_alignment_amplicon(
+			line1_chr,
+			line1_start,
+			line1_cigar,
+			bool(line1_rc),
+			start_amplicon_locs,
+			end_amplicon_locs,
+		)
+		amp2_aln = inward_alignment_amplicon(
+			line2_chr,
+			line2_start,
+			line2_cigar,
+			bool(line2_rc),
+			start_amplicon_locs,
+			end_amplicon_locs,
+		)
 
 		amp_same_key = ""
 		if assign_reads_to_all_possible_amplicons: # write all possible amplicons where this read could match - from the primer matching or the alignment
@@ -2909,13 +3286,35 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 			# Require primer agreement and at least one non-conflicting alignment-side check.
 			# Some valid read pairs only recover one amplicon boundary from the genomic alignment;
 			# previously those were discarded even when both primer calls agreed on the target.
-			accepted_amplicon = None
-			if amp1 == amp2 and amp1 != "NA":
-				alignment_calls = [x for x in (amp1_aln, amp2_aln) if x != "NA"]
-				if alignment_calls and all(x == amp1 for x in alignment_calls):
-					accepted_amplicon = amp1
-					if len(alignment_calls) < 2:
-						partial_alignment_rescue_count += 1
+			assignment = _classify_amplicon_assignment(
+				amp1,
+				amp2,
+				amp1_aln,
+				amp2_aln,
+				require_strict_amplicon_alignment = debug_require_strict_amplicon_alignment,
+				r1_mean_quality = mean_phred_quality(qual1),
+				r2_mean_quality = mean_phred_quality(qual2),
+				partial_rescue_min_mean_read_quality = partial_rescue_min_mean_read_quality,
+			)
+			accepted_amplicon = assignment["accepted_amplicon"]
+			reject_reason = assignment["reject_reason"]
+			if assignment["rescued_by_partial_alignment"]:
+				partial_alignment_rescue_count += 1
+				if rescued_reads_writer is not None:
+					rescued_reads_writer.write(line1)
+					rescued_reads_writer.write(line2)
+			if assignment["would_rescue_under_strict"]:
+				would_rescue_strict_alignment_count += 1
+			if reject_reason == "low_mean_quality":
+				rejected_rescue_low_quality_count += 1
+			elif reject_reason == "contradictory_alignment":
+				rejected_rescue_contradictory_alignment_count += 1
+			elif reject_reason == "no_inward_boundary_support":
+				rejected_rescue_no_inward_boundary_support_count += 1
+			if reject_reason in ("low_mean_quality", "contradictory_alignment", "no_inward_boundary_support"):
+				if rejected_rescue_reads_writer is not None:
+					rejected_rescue_reads_writer.write(line1)
+					rejected_rescue_reads_writer.write(line2)
 
 			if accepted_amplicon is not None:
 				if accepted_amplicon not in amp_filehandles:
@@ -2948,6 +3347,7 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 				amp_filehandles[accepted_amplicon][1].write("@%s\n%s\n%s\n%s\n"%(info2,seq2_to_write,"+",qual2))
 				id_reads_count += 1
 				amplicon_count[accepted_amplicon] += 1
+				aln_barcode_count[barcode] += 1
 			else:
 				unidentified_out1.write("@%s\n%s\n%s\n%s\n"%(info1,seq1_to_write,"+\t"+"\t".join([amp1,amp2,amp1_aln,amp2_aln]),qual1))
 				unidentified_out2.write("@%s\n%s\n%s\n%s\n"%(info2,seq2_to_write,"+",qual2))
@@ -2970,9 +3370,11 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 
 	unidentified_out1.close()
 	unidentified_out2.close()
+	_close_rescued_reads_writer(rescued_reads_writer, rescued_reads_proc, debug_rescued_reads_bam)
+	_close_rescued_reads_writer(rejected_rescue_reads_writer, rejected_rescue_reads_proc, debug_rejected_rescue_reads_bam)
 	for amp_name in amp_filehandles:
-	   amp_filehandles[amp_name][0].close()
-	   amp_filehandles[amp_name][1].close()
+		amp_filehandles[amp_name][0].close()
+		amp_filehandles[amp_name][1].close()
 
 	identified_amplicon_file = output_root + ".splitReads.valid_amps.txt"
 	with open(identified_amplicon_file,'w') as fout:
@@ -3012,8 +3414,8 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	#zip output
 	amp_commands = []
 	for amp_filename_r1,amp_filename_r2 in amp_filenames:
-		amp_commands.append('gzip -f ' + amp_filename_r1)
-		amp_commands.append('gzip -f ' + amp_filename_r2)
+		amp_commands.append(["gzip", "-f", amp_filename_r1])
+		amp_commands.append(["gzip", "-f", amp_filename_r2])
 
 
 	logging.info("gzipping output on "+ str(n_processes) + " threads..")
@@ -3047,11 +3449,20 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 		else:
 			amplicon_information[amp]['reads_r2_file'] = None
 
-	log_str = str(tot_reads_count) + " alignment pairs were processed (including multi-mapped and unaligned reads)\n" + \
-			"  Of these, " + str(aln_reads_count) + " read pairs were aligned to the genome\n" + \
-			"    Of these, " + str(id_reads_count) + " read pairs were aligned correctly and identified\n" + \
-			"      " + str(partial_alignment_rescue_count) + " read pairs were rescued because both primer calls agreed and one alignment-side check supported the amplicon without contradiction\n" + \
-			"    Of the unaligned reads, \n" + \
+		if debug_require_strict_amplicon_alignment:
+			rescue_log_line = "      " + str(would_rescue_strict_alignment_count) + " read pairs would have been rescued by partial-alignment rescue but were excluded by strict alignment mode\n"
+		else:
+			rescue_log_line = "      " + str(partial_alignment_rescue_count) + " read pairs were rescued because both primer calls agreed and one inward-facing alignment boundary supported the amplicon without contradiction\n"
+		rejected_rescue_log_line = \
+				"      " + str(rejected_rescue_low_quality_count) + " rescue candidate read pairs were rejected due to low mean read quality\n" + \
+				"      " + str(rejected_rescue_contradictory_alignment_count) + " rescue candidate read pairs were rejected due to contradictory alignment evidence\n" + \
+				"      " + str(rejected_rescue_no_inward_boundary_support_count) + " rescue candidate read pairs had primer agreement but no inward-facing boundary support\n"
+		log_str = str(tot_reads_count) + " alignment pairs were processed (including multi-mapped and unaligned reads)\n" + \
+				"  Of these, " + str(aln_reads_count) + " read pairs were aligned to the genome\n" + \
+				"    Of these, " + str(id_reads_count) + " read pairs were aligned correctly and identified\n" + \
+				rescue_log_line + \
+				rejected_rescue_log_line + \
+				"    Of the unaligned reads, \n" + \
 			"      " + str(chimeric_reads_count) + " read pairs were chimeric (contained primer sequences from different amplicons) \n" + \
 			"      " + str(aligned_other_loc_reads_count) + " read pairs aligned to a different genomic location than the amplicon location \n" + \
 			"      " + str(unidentified_reads_count) + " reads were otherwise unidentified\n"
@@ -3093,8 +3504,8 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 
 	if not keep_intermediate_files:
 		logging.debug('Deleting intermediate amplicon files')
-		delete_command = 'rm %s && rm %s'%(amplicon_fasta_file,aligned_amps_file)
-		run_command(delete_command)
+		safe_remove(amplicon_fasta_file, silent=True)
+		safe_remove(aligned_amps_file, silent=True)
 
 	return amplicon_names,amplicon_information,info_file
 
@@ -3153,7 +3564,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 		info_file = output_root+".crispresso.filtered.info.txt"
 		crispresso_dir = crispresso_dir + ".filtered"
 		if not os.path.isdir(crispresso_dir):
-			os.mkdir(crispresso_dir)
+			os.makedirs(crispresso_dir, exist_ok=True)
 		
 	else:
 		info_file = output_root+".crispresso.info.txt"
@@ -3171,6 +3582,10 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 
 		cache_is_valid = True
 		for amplicon_name, amp_info in crispresso_information.items():
+			if amp_info.get('status') == 'Failed':
+				cache_is_valid = False
+				logging.warning("Ignoring stale CRISPResso info cache because %s previously failed", amplicon_name)
+				break
 			if amp_info.get('status') != 'Completed':
 				continue
 			finished_file = amp_info.get('finished_file')
@@ -3220,13 +3635,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 				amp_filename_r2 = amplicon_information[amplicon_name].get('reads_r2_file')
 			
 			amplicon_seqs = amplicon_information[amplicon_name]['amp_seqs']
-			guide = amplicon_information[amplicon_name]['guide_seq']
-			guide_str = " -g " + guide + " "
-			if guide.lower() == "na" or guide.lower() == "none":
-				guide_str = ""
-			suppress_sub_crispresso_plots_str = ""
-			if suppress_sub_crispresso_plots:
-				suppress_sub_crispresso_plots_str = " --suppress_report --suppress_plots"
+			guide = _normalize_optional_guide(amplicon_information[amplicon_name].get('guide_seq', ''))
 			
 			
 			# Separate crispresso_cmd for alleles and non alleles
@@ -3260,7 +3669,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					"-r1", amp_filename,
 					"-a", amplicon_seqs,
 				]
-				if guide != "":
+				if guide:
 					crispresso_args.extend(["-g", guide])
 				
 			else:
@@ -3286,7 +3695,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					"-r2", amp_filename_r2,
 					"-a", amplicon_seqs,
 				]
-				if guide != "":
+				if guide:
 					crispresso_args.extend(["-g", guide])
 			
 			if suppress_sub_crispresso_plots:
@@ -3335,6 +3744,13 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 		result = pool.map_async(run_crispresso_command, crispresso_commands).get(threading.TIMEOUT_MAX)
 		pool.close()
 		pool.join()
+		for completed_job in result:
+			if completed_job.get('error'):
+				_raise_command_error(
+					completed_job.get('command'),
+					completed_job.get('returncode'),
+					context=completed_job.get('error'),
+				)
 
 	for amplicon_name in amplicon_names:
 		if 'status' in crispresso_information[amplicon_name] and crispresso_information[amplicon_name]['status'] == 'Skipped':
@@ -3431,18 +3847,20 @@ def run_command(cmd):
 
 	Notes
 	-----
-	- Executes with `shell=True`.
 	- Logs the command at DEBUG level.
-	- Errors are logged but not raised.
-	- Does not capture stdout.
+	- Raises ExternalCommandError on failures.
 	"""
 	try:
-		logging.debug('running: ' + cmd)
-		return_value = sb.call(cmd,shell=True)
-		return {'returncode': return_value, 'error': None}
+		logging.debug('running: ' + _command_to_string(cmd))
+		completed = sb.run(cmd, shell=isinstance(cmd, str), stdout=sb.PIPE, stderr=sb.PIPE)
 	except Exception as e:
-		logging.error("error: %s on %s" % (e, cmd))
-		return {'returncode': None, 'error': str(e)}
+		logging.error("error: %s on %s" % (e, _command_to_string(cmd)))
+		_raise_command_error(cmd, context=str(e))
+	if completed.returncode != 0:
+		stderr = completed.stderr.decode(errors="replace") if isinstance(completed.stderr, bytes) else completed.stderr
+		logging.error("return code %s on %s", completed.returncode, _command_to_string(cmd))
+		_raise_command_error(cmd, completed.returncode, stderr=stderr)
+	return {'returncode': completed.returncode, 'error': None}
 
 def get_command_output(command):
 	"""
@@ -3460,16 +3878,17 @@ def get_command_output(command):
 
 	Notes
 	-----
-	- Uses subprocess.Popen with shell=True.
+	- Uses subprocess.Popen without a shell when an argument list is provided.
 	- stderr is redirected to stdout.
 	- Caller is responsible for consuming the iterator.
 	""" 
 	p = sb.Popen(command,
 			stdout=sb.PIPE,
-			stderr=sb.STDOUT,shell=True,
+			stderr=sb.STDOUT,
+			shell=isinstance(command, str),
 			universal_newlines=True,
 			bufsize=-1)#bufsize system default
-	return iter(p.stdout.readline, b'')
+	return iter(p.stdout.readline, '')
 
 def parse_one_crispresso_output(this_args):
 	"""
@@ -3654,9 +4073,7 @@ def parse_one_crispresso_output(this_args):
 		num_references = len(seen_refs)
 
 	#set up allele order
-	input_ref_names = ['Reference']
-	for i in range(1,num_references):
-		input_ref_names[i] = 'Amplicon'+str(i)
+	input_ref_names = _build_input_ref_names(num_references)
 
 	if 'NA' in input_ref_allele_counts:
 		print('WARNING, NA input ref count!')
@@ -3863,6 +4280,7 @@ def parse_one_crispresso_output(this_args):
 	with open (folder_finished_file,'w') as fout:
 		fout.write("Total reads\t" + str(tot_count)+"\n")
 		fout.write("CRISPResso2 aligned reads\t" + str(crispresso2_aligned_count)+"\n")
+		fout.write("Ignore substitutions\t" + str(bool(ignore_substitutions))+"\n")
 		fout.write(str(datetime.now()))
 
 def write_max_alleles(allele_dict, barcode, allele_key, amplicon_name, amplicon_folder, allele_file, wildtype_allele):
@@ -3992,6 +4410,23 @@ def get_wildtype_allele(crispresso_run_folder):
 	return max_allele
 
 
+def _parse_cache_matches_ignore_substitutions(folder_finished_file, ignore_substitutions):
+	if not os.path.isfile(folder_finished_file):
+		return False
+
+	expected_value = str(bool(ignore_substitutions))
+	observed_value = None
+	with open(folder_finished_file, 'r') as fin:
+		for line in fin:
+			if line.startswith("Ignore substitutions\t"):
+				observed_value = line.rstrip("\n").split("\t", 1)[1]
+				break
+
+	if observed_value is None:
+		return False
+	return observed_value == expected_value
+
+
 def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_file,crispresso_information,
 							output_root, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, n_processes,num_max_alleles=2,num_references=1,
 							min_num_reads_per_cell=5,min_allele_pct_cutoff=.1,min_allele_count_cutoff=2,
@@ -4054,7 +4489,13 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 			input_ref_allele_counts = amplicon_information[name]['input_ref_allele_counts']
 			folder_finished_file = crispresso_run_folder + ".summ.finished"
 
-			if not os.path.isfile(folder_finished_file):
+			if not _parse_cache_matches_ignore_substitutions(folder_finished_file, ignore_substitutions):
+				if os.path.isfile(folder_finished_file):
+					logging.info(
+						"Reparsing %s because ignore_substitutions changed to %s",
+						name,
+						ignore_substitutions,
+					)
 				this_args = {'amplicon_name':name,
 							 'amplicon_info_file':amplicon_info_file,
 							 'crispresso_run_folder':crispresso_run_folder,
@@ -4198,9 +4639,7 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 		amp_score.to_csv(amp_score_file, sep = "\t")
 		end_amplicon_score_time = time.time() - amplicon_score_time
 		logging.info("Generated amplicon score in %.2f seconds"%(end_amplicon_score_time))
-	
-	# writing out a filtered editingSummary file
-	# this removes cells filtered out within generate_amplicon_score
+
 	with open(output_root+".filteredEditingSummaryPseudobulk.txt",'w') as fout:
 		header = "cell"
 		for name in amplicon_names:
@@ -4220,31 +4659,184 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 				line += val
 			fout.write(line+"\n")
 
-	with open(output_root+".filteredEditingSummary.txt",'w') as fout:
+	summary_df = add_color_information(summary_df, amp_score)
+
+	return summary_df
+
+
+def _crispresso_annotation_is_modified(annotation_line, ignore_substitutions=False):
+	"""
+	Classify one CRISPResso output FASTQ annotation line as modified/unmodified.
+	"""
+	if "ALN=NA" in annotation_line:
+		return None
+	field_values = {}
+	for field in ("DEL", "INS", "SUB"):
+		match = re.search(r"(?:^|\s)" + field + r"=([^\s]*)", annotation_line)
+		if match is None:
+			field_values[field] = None
+		else:
+			field_values[field] = match.group(1)
+	if field_values["DEL"] is None or field_values["INS"] is None:
+		return None
+	if not ignore_substitutions and field_values["SUB"] is None:
+		return None
+	mod_fields = ["DEL", "INS"]
+	if not ignore_substitutions:
+		mod_fields.append("SUB")
+	return any(field_values[field] not in (None, "") for field in mod_fields)
+
+
+def _load_final_allele_read_support(summ_file):
+	"""
+	Read first-pass per-cell final allele read support from a .summ file.
+	"""
+	read_support = defaultdict(dict)
+	if not summ_file or not os.path.isfile(summ_file):
+		return read_support
+	with open(summ_file, "r") as fin:
+		header = fin.readline().strip().split("\t")
+		header_idx = {name: idx for idx, name in enumerate(header)}
+		if "cell" not in header_idx or "final_cell_allele_readcount_string" not in header_idx:
+			return read_support
+		for line in fin:
+			line_els = line.rstrip("\n").split("\t")
+			if len(line_els) <= header_idx["final_cell_allele_readcount_string"]:
+				continue
+			cell = line_els[header_idx["cell"]]
+			readcount_string = line_els[header_idx["final_cell_allele_readcount_string"]]
+			if readcount_string in ("", "NA"):
+				continue
+			for allele_idx, read_count in enumerate(readcount_string.split(","), start=1):
+				try:
+					read_support[cell][allele_idx] = int(read_count)
+				except ValueError:
+					read_support[cell][allele_idx] = 0
+	return read_support
+
+
+def _parse_filtered_crispresso_allele_output(crispresso_output_fastq, read_support, valid_barcodes, ignore_substitutions=False):
+	"""
+	Aggregate filtered CRISPResso allele classifications by barcode.
+	"""
+	results = defaultdict(lambda: {"support": 0, "modified": 0, "total": 0})
+	if not crispresso_output_fastq or not os.path.isfile(crispresso_output_fastq):
+		return results
+
+	with gzip.open(crispresso_output_fastq, "rt") as fin:
+		while True:
+			header = fin.readline()
+			if not header:
+				break
+			sequence = fin.readline()
+			annotation = fin.readline()
+			quality = fin.readline()
+			if not quality:
+				break
+
+			header_token = header.strip().split(" ")[0]
+			if header_token.startswith("@"):
+				header_token = header_token[1:]
+			header_els = header_token.split(":")
+			if len(header_els) < 3:
+				continue
+			barcode = header_els[-2]
+			try:
+				allele_idx = int(header_els[-1])
+			except ValueError:
+				continue
+			if barcode not in valid_barcodes:
+				continue
+
+			is_modified = _crispresso_annotation_is_modified(annotation, ignore_substitutions=ignore_substitutions)
+			if is_modified is None:
+				continue
+
+			results[barcode]["total"] += 1
+			if is_modified:
+				results[barcode]["modified"] += 1
+			results[barcode]["support"] += read_support.get(barcode, {}).get(allele_idx, 0)
+	return results
+
+
+def _write_filtered_summary_table(path, amplicon_names, cells, usable_amplicon_names, filtered_data):
+	"""
+	Write a filtered editing summary table with CRISPResso-derived genotype calls.
+	"""
+	with open(path, "w") as fout:
 		header = "cell"
 		for name in amplicon_names:
-			header += "\ttotCount.%s\tmodPct.%s"%(name,name)
-		fout.write(header+"\n")
+			header += "\ttotCount.%s\tmodPct.%s" % (name, name)
+		fout.write(header + "\n")
 
 		for cell in cells:
-			if cell not in amp_score.index:
-				continue
 			line = cell
 			for name in amplicon_names:
 				val = "\tNA\tNA"
 				if name in usable_amplicon_names:
 					val = "\t0\tNA"
-				if name in data[cell]:
-					val = data[cell][name][1]
+				if cell in filtered_data and name in filtered_data[cell]:
+					this_data = filtered_data[cell][name]
+					if this_data["total"] > 0:
+						mod_pct = round(100 * this_data["modified"] / float(this_data["total"]), 2)
+						val = "\t%s\t%s" % (this_data["support"], mod_pct)
 				line += val
-			fout.write(line+"\n")
-
-	logging.info("Finished reading and compiling summaries for %d filtered cells"%len(amp_score))
+			fout.write(line + "\n")
 
 
-	summary_df = add_color_information(summary_df, amp_score)
-	 
-	return summary_df
+def write_filtered_editing_summary_from_filtered_crispresso(
+	amplicon_names,
+	crispresso_information,
+	crispresso_filtered_information,
+	output_root,
+	ignore_substitutions=False,
+):
+	"""
+	Write filteredEditingSummary from filtered CRISPResso allele classifications.
+	"""
+	amp_score_file = output_root + ".amplicon_score.txt"
+	if not os.path.isfile(amp_score_file):
+		raise FileNotFoundError("Amplicon score file does not exist: " + amp_score_file)
+	amp_score = pd.read_csv(amp_score_file, sep="\t", index_col=0)
+	cells = list(amp_score.index)
+	valid_barcodes = set(cells)
+
+	filtered_data = defaultdict(dict)
+	usable_amplicon_names = []
+	for amplicon_name in amplicon_names:
+		filtered_info = crispresso_filtered_information.get(amplicon_name, {})
+		if filtered_info.get("status") != "Completed":
+			continue
+		crispresso_run_folder = filtered_info.get("crispresso_run_folder")
+		crispresso_output_fastq = os.path.join(crispresso_run_folder, "CRISPResso_output.fastq.gz") if crispresso_run_folder else None
+		if not crispresso_output_fastq or not os.path.isfile(crispresso_output_fastq):
+			continue
+
+		usable_amplicon_names.append(amplicon_name)
+		first_pass_info = crispresso_information.get(amplicon_name, {})
+		first_pass_folder = first_pass_info.get("crispresso_run_folder")
+		first_pass_summ = first_pass_folder + ".summ" if first_pass_folder else None
+		read_support = _load_final_allele_read_support(first_pass_summ)
+		amplicon_calls = _parse_filtered_crispresso_allele_output(
+			crispresso_output_fastq,
+			read_support,
+			valid_barcodes,
+			ignore_substitutions=ignore_substitutions,
+		)
+		for cell, call_data in amplicon_calls.items():
+			filtered_data[cell][amplicon_name] = call_data
+
+	_write_filtered_summary_table(
+		output_root + ".filteredEditingSummary.txt",
+		amplicon_names,
+		cells,
+		set(usable_amplicon_names),
+		filtered_data,
+	)
+	logging.info("Finished writing filtered editing summary for %d filtered cells", len(cells))
+
+	filtered_summary = pd.read_csv(output_root + ".filteredEditingSummary.txt", sep="\t", index_col=0)
+	return add_color_information(filtered_summary, amp_score)
 
 
 def stratify_data(input_data):
@@ -4342,9 +4934,19 @@ def generate_amplicon_score(raw_tot_columns, min_reads_per_amplicon_per_cell, mi
 	"""
 	percentile_cutoffs = [0.975, 0.99, 0.999, 0.9999]
 	constant_values = [1, 10, 50, 100]
+	output_columns = ['Amplicon Score', 'Read Count', 'Barcode Rank', 'Color']
 
 	if raw_tot_columns.empty or raw_tot_columns.shape[1] == 0:
-		return pd.DataFrame(columns = ['Amplicon Score', 'Read Count', 'Barcode Rank', 'Color'])
+		return pd.DataFrame(columns = output_columns)
+
+	if raw_tot_columns.columns.duplicated().any():
+		dup_cols = raw_tot_columns.columns[raw_tot_columns.columns.duplicated(keep = False)].unique()
+		raise ValueError(f"Duplicate amplicon names detected: {list(dup_cols)}")
+
+	raw_tot_columns = raw_tot_columns.apply(pd.to_numeric, errors = "coerce")
+	raw_tot_columns = raw_tot_columns.dropna(axis = 1, how = "all")
+	if raw_tot_columns.empty or raw_tot_columns.shape[1] == 0:
+		return pd.DataFrame(columns = output_columns)
 	
 	# Filter to cells with 'min_reads_per_amplicon_per_cell' or more reads for all amplicons
 	mask = (raw_tot_columns >= min_reads_per_amplicon_per_cell).all(axis = 1)
@@ -4352,34 +4954,23 @@ def generate_amplicon_score(raw_tot_columns, min_reads_per_amplicon_per_cell, mi
 	raw_tot_columns = raw_tot_columns.loc[mask]
 
 	logging.info('Cells that did not pass the read count per amplicon cutoff:' + str(len(mask) - sum(mask)))
-   
-	# Filter
-	# Create a list of the percentile values for each amplicon
-	percentile_values = []
-	for percentile in percentile_cutoffs:
-		percentile_values.append(raw_tot_columns.quantile(percentile, axis = 0))
-		
-	# Create a dictionary to store the amplicon scores
-	amplicon_dict = {}
+
+	if raw_tot_columns.empty:
+		return pd.DataFrame(columns = output_columns)
 	
-	# Calculate the amplicon statistic
-	for df_index, row in raw_tot_columns.iterrows():
-		barcode_sum = 0
-		for index in range(0, len(percentile_cutoffs)):
-			# Get the percentile values for the current amplicon
-			percentile_vals = percentile_values[index]
-			# Get the constant value for the current percentile cutoff
-			constant_val = constant_values[index]
-			# Calculate the amplicon stat: 
-			# percentage of amplicon values over the percentile value multiplied by a constant
-			amplicon_stat = ((sum(row >= percentile_vals)) / len(percentile_vals)) * constant_val
-			barcode_sum += amplicon_stat
-		# Assign the amplicon score to the amplicon dictionary
-		amplicon_dict[df_index] = barcode_sum
+	amplicon_scores = pd.Series(0, index = raw_tot_columns.index, dtype = float)
+	for percentile, constant_val in zip(percentile_cutoffs, constant_values):
+		percentile_vals = raw_tot_columns.quantile(percentile, axis = 0)
+		stat = (
+			raw_tot_columns.ge(percentile_vals, axis = 1).sum(axis = 1)
+			/ len(percentile_vals)
+		) * constant_val
+		amplicon_scores += stat
 	
-	amplicon_df = pd.DataFrame.from_dict(amplicon_dict, orient = 'index', columns = ['Amplicon Score'])
-	raw_sum = raw_tot_columns.sum(axis = 1)
-	amplicon_df['Read Count'] = raw_sum
+	amplicon_df = pd.DataFrame({
+		'Amplicon Score': amplicon_scores,
+		'Read Count': raw_tot_columns.sum(axis = 1),
+	})
 	amplicon_df = amplicon_df.sort_values("Read Count", ascending = False)
 	amplicon_df['Barcode Rank'] = range(1, len(amplicon_df) + 1)
 	
@@ -4618,7 +5209,7 @@ def log_log_plot(parsed_information, output_root, cell_quality_to_analyze, filte
 	
 	colors = [COLOR_DISPLAY_MAP[color] for color in colors]
 	
-	totCols = parsed_information.filter(like = "totCount")
+	totCols = _numeric_tot_count_columns(parsed_information)
 	rowsum_data = {"Barcode": totCols.index,
 			"Read Count": totCols.sum(axis = 1)}
 
@@ -4740,11 +5331,11 @@ def cell_per_amp_filtered(parsed_information, output_root, cell_quality_to_analy
 	#parsed_information = parsed_information[parsed_information['Color'].isin(["High Score / High Reads", "High Score / Low Reads"])]
 
 	# Grab total count columns
-	totCols = parsed_information.filter(like = "totCount")
+	totCols = _numeric_tot_count_columns(parsed_information)
 
 	# Get counts of cells with different read cutoffs
 	read_cutoffs = [1, 5, 10, 25, 50, 100]
-	counts = {f'{c} reads': (parsed_information[totCols.columns] >= c).sum() for c in read_cutoffs}
+	counts = {f'{c} reads': (totCols >= c).sum() for c in read_cutoffs}
 
 	# Create a DataFrame with counts
 	tots = pd.DataFrame(counts).T
@@ -4838,28 +5429,29 @@ def amp_per_cell_filtered(parsed_information, output_root, cell_quality_to_analy
 
 	read_cutoffs = [1,5,10,25,50,100]
 	# Grab total count columns
-	cov_cols = [col for col in parsed_information.columns if col.startswith("totCount")]
+	totCols = _numeric_tot_count_columns(parsed_information)
+	cov_cols = list(totCols.columns)
 	# Row sum of cells with amplicon coverage at specified cutoffs
-	g1 = (parsed_information[cov_cols] >= 1).sum(axis=1) 
-	g5 = (parsed_information[cov_cols] >= 5).sum(axis=1)
-	g10 = (parsed_information[cov_cols] >= 10).sum(axis=1)
-	g25 = (parsed_information[cov_cols] >= 25).sum(axis=1)
-	g50 = (parsed_information[cov_cols] >= 50).sum(axis=1)
-	g100 = (parsed_information[cov_cols] >= 100).sum(axis=1)
+	g1 = (totCols >= 1).sum(axis=1) 
+	g5 = (totCols >= 5).sum(axis=1)
+	g10 = (totCols >= 10).sum(axis=1)
+	g25 = (totCols >= 25).sum(axis=1)
+	g50 = (totCols >= 50).sum(axis=1)
+	g100 = (totCols >= 100).sum(axis=1)
 
 	# Determine number of amplicons for 90%, 80%, and 50% coverage of target amplicons
 	cov_100pct = len(cov_cols)
 	cov_90pct = round(len(cov_cols) * 0.9)
 	cov_80pct = round(len(cov_cols) * 0.8)
 	cov_50pct = round(len(cov_cols) * 0.5)
-	break_vals = [cov_100pct, cov_90pct, cov_80pct, cov_50pct]
+	break_vals = list(dict.fromkeys([cov_100pct, cov_90pct, cov_80pct, cov_50pct]))
 
-	vals1 = [len(g1[g1 > cov_100pct]), len(g1[g1 > cov_90pct]), len(g1[g1 > cov_80pct]), len(g1[g1 > cov_50pct])]
-	vals5 = [len(g5[g5 > cov_100pct]), len(g5[g5 > cov_90pct]), len(g5[g5 > cov_80pct]), len(g5[g5 > cov_50pct])]
-	vals10 = [len(g10[g10 > cov_100pct]), len(g10[g10 > cov_90pct]), len(g10[g10 > cov_80pct]), len(g10[g10 > cov_50pct])]
-	vals25 = [len(g25[g25 > cov_100pct]), len(g25[g25 > cov_90pct]), len(g25[g25 > cov_80pct]), len(g25[g25 > cov_50pct])]
-	vals50 = [len(g50[g50 > cov_100pct]), len(g50[g50 > cov_90pct]), len(g50[g50 > cov_80pct]), len(g50[g50 > cov_50pct])]
-	vals100 = [len(g100[g100 > cov_100pct]), len(g100[g100 > cov_90pct]), len(g100[g100 > cov_80pct]), len(g100[g100 > cov_50pct])]
+	vals1 = [len(g1[g1 > val]) for val in break_vals]
+	vals5 = [len(g5[g5 > val]) for val in break_vals]
+	vals10 = [len(g10[g10 > val]) for val in break_vals]
+	vals25 = [len(g25[g25 > val]) for val in break_vals]
+	vals50 = [len(g50[g50 > val]) for val in break_vals]
+	vals100 = [len(g100[g100 > val]) for val in break_vals]
 
 	# Create DataFrame structure
 	tots = pd.DataFrame([vals1, vals5, vals10, vals25, vals50, vals100], 
@@ -4970,14 +5562,21 @@ def mod_per_amp_filtered(parsed_information, output_root, cell_quality_to_analyz
 	PerMod_df = pd.DataFrame(columns=['Read_cutoff', 'Mod_average', 'Target', 'Color'])        
 		
 	for color in colors:
+		color_rows = parsed_information[parsed_information['Color'] == color]
+		totCols = _numeric_tot_count_columns(color_rows)
+		modCols = _numeric_mod_pct_columns(color_rows)
+		mod_cols_by_target = {}
+		for mod_col in modCols.columns:
+			target = mod_col.replace('modPct.', '', 1).replace('modPct_', '', 1)
+			mod_cols_by_target[target] = mod_col
 		for cutoff in read_cutoffs:
-			totCols = parsed_information[parsed_information['Color'] == color].filter(like = 'totCount')
-			modCols = parsed_information[parsed_information['Color'] == color].filter(like = 'modPct')
-			for i in range(0, totCols.shape[1]):
-				totCol = totCols.iloc[:, i]
-				modCol = modCols.iloc[:, i]
+			for tot_col in totCols.columns:
+				totCol = totCols[tot_col]
+				col_title = tot_col.replace('totCount.', '', 1).replace('totCount_', '', 1)
+				if col_title not in mod_cols_by_target:
+					continue
+				modCol = modCols[mod_cols_by_target[col_title]]
 				modAvg = modCol[totCol >= cutoff].mean()
-				col_title = totCol.name.replace('totCount.', '')
 				PerMod_df.loc[len(PerMod_df)] = [cutoff, modAvg, col_title, color]
 				
 	# Create a combined average df for ordering in the plot

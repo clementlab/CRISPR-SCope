@@ -161,7 +161,7 @@ You may also use `genome` instead of `bowtie2_index`; internally the pipeline re
 | `processes` | all available CPUs | Number of processes to use. |
 | `allowBarcodeMismatches` | off | Enables single-mismatch barcode rescue. |
 | `keep_intermediate_files` | `False` | Keeps intermediate files instead of cleaning them up. |
-| `ignore_substitutions` | `False` | Ignores substitutions during downstream editing summarization. |
+| `ignore_substitutions` | `False` | Ignores substitution annotations when parsing CRISPResso read-alignment output and summarizing downstream editing calls. |
 | `assign_reads_to_all_possible_amplicons` | `False` | If `True`, assigns ambiguous reads to every plausible amplicon. |
 | `suppress_sub_crispresso_plots` | `False` | Disables per-amplicon CRISPResso plot/report generation. |
 | `alt_alleles_file` | not used | Optional alternate allele definition file. |
