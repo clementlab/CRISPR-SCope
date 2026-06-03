@@ -1,4 +1,5 @@
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -270,3 +271,52 @@ def test_parse_settings_rejects_strict_alignment_with_assign_all(tmp_path, monke
 				"assign_reads_to_all_possible_amplicons\ttrue",
 			],
 		)
+
+
+def test_split_reads_single_assignment_counts_accepted_read_in_aligned_barcode_file(tmp_path, monkeypatch):
+	output_root = str(tmp_path / "run")
+	amp_file_dir = tmp_path / "run.seq_by_amplicon"
+	amp_file_dir.mkdir()
+	amplicon_file = tmp_path / "amplicons.txt"
+	amplicon_seq = "ACGTACGT" + ("A" * 84) + "GATTACCA"
+	amplicon_file.write_text(f"ampA\t{amplicon_seq}\tACGT\t1\n")
+
+	real_subprocess_run = cli.sb.run
+
+	def fake_bowtie_run(command, stdout=None, stderr=None, **kwargs):
+		if not (isinstance(command, (list, tuple)) and command and command[0] == "bowtie2"):
+			return real_subprocess_run(command, stdout=stdout, stderr=stderr, **kwargs)
+		stdout.write(
+			"ampA\t0\tchr1\t101\t60\t100M\t*\t0\t0\t"
+			+ amplicon_seq
+			+ "\t"
+			+ ("I" * len(amplicon_seq))
+			+ "\n"
+		)
+		return SimpleNamespace(returncode=0)
+
+	read_name = "read:CELL1"
+	read_qual = "I" * len(amplicon_seq)
+	read1 = f"{read_name}\t0\tchr1\t101\t60\t100M\t*\t0\t0\t{amplicon_seq}\t{read_qual}\n"
+	read2 = f"{read_name}\t16\tchr1\t101\t60\t100M\t*\t0\t0\t{amplicon_seq}\t{read_qual}\n"
+
+	monkeypatch.setattr(cli.sb, "run", fake_bowtie_run)
+	monkeypatch.setattr(cli, "get_command_output", lambda command: iter([read1, read2]))
+
+	cli.split_reads_by_amplicon(
+		aligned_bam=str(tmp_path / "aligned.bam"),
+		output_root=output_root,
+		amplicon_file=str(amplicon_file),
+		alt_alleles_file="",
+		primer_lookup_len=8,
+		amp_file_dir=str(amp_file_dir),
+		bowtie2_index=str(tmp_path / "genome"),
+		adapter_DNA="NNNNNNNN",
+		n_processes=1,
+		keep_intermediate_files=True,
+		reads_per_cell={"CELL1": 1},
+		min_total_reads_per_barcode=0,
+	)
+
+	aligned_counts = (tmp_path / "run.splitReads.aligned.txt").read_text().splitlines()
+	assert aligned_counts == ["Barcode\tAligned Count", "CELL1\t1"]

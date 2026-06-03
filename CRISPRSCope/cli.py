@@ -1140,6 +1140,9 @@ def generate_edit_histogram(output_root, cell_quality_to_analyze):
 	editing = editing > 0
 	
 	row_sum = editing.sum(axis = 1)
+	if row_sum.empty:
+		logging.warning("Skipping edit histogram because no selected cells were found")
+		return None
 	
 	# Calculate the bin edges
 	bin_edges = [x - 0.5 for x in range(0, max(row_sum) + 2)]
@@ -3344,6 +3347,7 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 				amp_filehandles[accepted_amplicon][1].write("@%s\n%s\n%s\n%s\n"%(info2,seq2_to_write,"+",qual2))
 				id_reads_count += 1
 				amplicon_count[accepted_amplicon] += 1
+				aln_barcode_count[barcode] += 1
 			else:
 				unidentified_out1.write("@%s\n%s\n%s\n%s\n"%(info1,seq1_to_write,"+\t"+"\t".join([amp1,amp2,amp1_aln,amp2_aln]),qual1))
 				unidentified_out2.write("@%s\n%s\n%s\n%s\n"%(info2,seq2_to_write,"+",qual2))
