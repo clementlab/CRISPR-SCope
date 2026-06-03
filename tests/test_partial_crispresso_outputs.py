@@ -3,9 +3,11 @@ import gzip
 import pandas as pd
 import pytest
 
+import CRISPRSCope.cli as cli
 from CRISPRSCope.cli import (
     generate_amplicon_score,
     parse_crispresso_outputs,
+    run_crispresso_commands,
     write_filtered_editing_summary_from_filtered_crispresso,
 )
 
@@ -22,7 +24,7 @@ def test_parse_crispresso_outputs_preserves_failed_amplicons_as_na(tmp_path):
         "cellA	12	25.0	NA	10	20.0	NA	1	M	D	10	10	20.0\n"
     )
     finished_marker = completed_run_folder.with_suffix(completed_run_folder.suffix + ".summ.finished")
-    finished_marker.write_text("done\n")
+    finished_marker.write_text("Ignore substitutions\tFalse\n")
 
     amplicon_information = {
         "amp_ok": {"input_ref_allele_counts": "1"},
@@ -134,6 +136,157 @@ def _write_filtered_crispresso_fastq(path, records):
             fout.write(sequence + "\n")
             fout.write(annotation + "\n")
             fout.write("a" * len(sequence) + "\n")
+
+
+def _make_crispresso_inputs(tmp_path, amplicon_name="ampA"):
+    r1 = tmp_path / f"{amplicon_name}.r1.fq.gz"
+    r2 = tmp_path / f"{amplicon_name}.r2.fq.gz"
+    r1.write_text("")
+    r2.write_text("")
+    return {
+        amplicon_name: {
+            "aln_count": "1",
+            "reads_r1_file": str(r1),
+            "reads_r2_file": str(r2),
+            "amp_seqs": "ACGT",
+            "guide_seq": "AC",
+        }
+    }
+
+
+def _write_completed_crispresso_output(crispresso_dir, amplicon_name="ampA"):
+    run_folder = crispresso_dir / f"CRISPResso_on_{amplicon_name}"
+    run_folder.mkdir(parents=True, exist_ok=True)
+    (run_folder / "CRISPResso2_info.json").write_text("{}\n")
+    finished_file = crispresso_dir / f"{amplicon_name}.finished"
+    finished_file.write_text("done\n")
+    return run_folder, finished_file
+
+
+def test_run_crispresso_commands_does_not_pass_ignore_substitutions_to_crispresso(tmp_path):
+    output_root = str(tmp_path / "run")
+    crispresso_dir = tmp_path / "run.crispresso"
+    crispresso_dir.mkdir()
+    amplicon_information = _make_crispresso_inputs(tmp_path)
+    _write_completed_crispresso_output(crispresso_dir)
+
+    result = run_crispresso_commands(
+        amplicon_names=["ampA"],
+        amplicon_information=amplicon_information,
+        output_root=output_root,
+        crispresso_dir=str(crispresso_dir),
+        suppress_sub_crispresso_plots=False,
+        n_processes=1,
+        alleles=False,
+    )
+
+    assert "--ignore_substitutions" not in result["ampA"]["crispresso_command"]
+
+
+def test_parse_crispresso_outputs_reparses_when_ignore_substitutions_changes(tmp_path, monkeypatch):
+    output_root = str(tmp_path / "run")
+    run_folder = tmp_path / "CRISPResso_on_ampA"
+    run_folder.mkdir()
+    summ_path = run_folder.with_suffix(run_folder.suffix + ".summ")
+    _write_first_pass_summ(
+        summ_path,
+        [
+            "cellA\t10\t100.0\tNA\t10\t100.0\tNA\t1\tM\tS\t10\t10\t100.0\n",
+        ],
+    )
+    finished_marker = run_folder.with_suffix(run_folder.suffix + ".summ.finished")
+    finished_marker.write_text("Total reads\t10\nCRISPResso2 aligned reads\t10\nIgnore substitutions\tFalse\n")
+
+    calls = []
+
+    def fake_parse_one_crispresso_output(this_args):
+        calls.append(this_args)
+        _write_first_pass_summ(
+            summ_path,
+            [
+                "cellA\t10\t0.0\tNA\t10\t0.0\tNA\t1\tU\tU\t10\t10\t0.0\n",
+            ],
+        )
+        finished_marker.write_text(
+            "Total reads\t10\nCRISPResso2 aligned reads\t10\nIgnore substitutions\tTrue\n"
+        )
+
+    monkeypatch.setattr(cli, "parse_one_crispresso_output", fake_parse_one_crispresso_output)
+
+    summary_df = parse_crispresso_outputs(
+        amplicon_names=["ampA"],
+        amplicon_information={"ampA": {"input_ref_allele_counts": "1"}},
+        amplicon_info_file=str(tmp_path / "amplicons.txt"),
+        crispresso_information={
+            "ampA": {
+                "status": "Completed",
+                "crispresso_run_folder": str(run_folder),
+            },
+        },
+        output_root=output_root,
+        min_total_reads_per_barcode=0,
+        min_reads_per_amplicon_per_cell=0,
+        n_processes=1,
+        ignore_substitutions=True,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["ignore_substitutions"] is True
+    assert summary_df.loc["cellA", "modPct.ampA"] == 0.0
+
+
+def test_parse_crispresso_outputs_reparses_legacy_summary_without_ignore_substitutions_metadata(
+    tmp_path, monkeypatch
+):
+    output_root = str(tmp_path / "run")
+    run_folder = tmp_path / "CRISPResso_on_ampA"
+    run_folder.mkdir()
+    summ_path = run_folder.with_suffix(run_folder.suffix + ".summ")
+    _write_first_pass_summ(
+        summ_path,
+        [
+            "cellA\t10\t100.0\tNA\t10\t100.0\tNA\t1\tM\tS\t10\t10\t100.0\n",
+        ],
+    )
+    finished_marker = run_folder.with_suffix(run_folder.suffix + ".summ.finished")
+    finished_marker.write_text("Total reads\t10\nCRISPResso2 aligned reads\t10\n")
+
+    calls = []
+
+    def fake_parse_one_crispresso_output(this_args):
+        calls.append(this_args)
+        _write_first_pass_summ(
+            summ_path,
+            [
+                "cellA\t10\t0.0\tNA\t10\t0.0\tNA\t1\tU\tU\t10\t10\t0.0\n",
+            ],
+        )
+        finished_marker.write_text(
+            "Total reads\t10\nCRISPResso2 aligned reads\t10\nIgnore substitutions\tFalse\n"
+        )
+
+    monkeypatch.setattr(cli, "parse_one_crispresso_output", fake_parse_one_crispresso_output)
+
+    summary_df = parse_crispresso_outputs(
+        amplicon_names=["ampA"],
+        amplicon_information={"ampA": {"input_ref_allele_counts": "1"}},
+        amplicon_info_file=str(tmp_path / "amplicons.txt"),
+        crispresso_information={
+            "ampA": {
+                "status": "Completed",
+                "crispresso_run_folder": str(run_folder),
+            },
+        },
+        output_root=output_root,
+        min_total_reads_per_barcode=0,
+        min_reads_per_amplicon_per_cell=0,
+        n_processes=1,
+        ignore_substitutions=False,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["ignore_substitutions"] is False
+    assert summary_df.loc["cellA", "modPct.ampA"] == 0.0
 
 
 def test_filtered_editing_summary_uses_filtered_crispresso_calls_and_original_support(tmp_path):

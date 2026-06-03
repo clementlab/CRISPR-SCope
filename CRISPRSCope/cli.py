@@ -1239,7 +1239,7 @@ def generate_upset_plot(output_root, cell_quality_to_analyze):
 	editing.fillna(0,inplace=True)
 	
 	# Convert to a boolean matrix
-	editing = editing.applymap(lambda x: False if x == 0 else True)
+	editing = editing != 0
 	
 	# Find top 5 combinations of edit values
 	counts = editing.apply(tuple, axis = 1).value_counts()
@@ -4276,6 +4276,7 @@ def parse_one_crispresso_output(this_args):
 	with open (folder_finished_file,'w') as fout:
 		fout.write("Total reads\t" + str(tot_count)+"\n")
 		fout.write("CRISPResso2 aligned reads\t" + str(crispresso2_aligned_count)+"\n")
+		fout.write("Ignore substitutions\t" + str(bool(ignore_substitutions))+"\n")
 		fout.write(str(datetime.now()))
 
 def write_max_alleles(allele_dict, barcode, allele_key, amplicon_name, amplicon_folder, allele_file, wildtype_allele):
@@ -4405,6 +4406,23 @@ def get_wildtype_allele(crispresso_run_folder):
 	return max_allele
 
 
+def _parse_cache_matches_ignore_substitutions(folder_finished_file, ignore_substitutions):
+	if not os.path.isfile(folder_finished_file):
+		return False
+
+	expected_value = str(bool(ignore_substitutions))
+	observed_value = None
+	with open(folder_finished_file, 'r') as fin:
+		for line in fin:
+			if line.startswith("Ignore substitutions\t"):
+				observed_value = line.rstrip("\n").split("\t", 1)[1]
+				break
+
+	if observed_value is None:
+		return False
+	return observed_value == expected_value
+
+
 def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_file,crispresso_information,
 							output_root, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, n_processes,num_max_alleles=2,num_references=1,
 							min_num_reads_per_cell=5,min_allele_pct_cutoff=.1,min_allele_count_cutoff=2,
@@ -4467,7 +4485,13 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 			input_ref_allele_counts = amplicon_information[name]['input_ref_allele_counts']
 			folder_finished_file = crispresso_run_folder + ".summ.finished"
 
-			if not os.path.isfile(folder_finished_file):
+			if not _parse_cache_matches_ignore_substitutions(folder_finished_file, ignore_substitutions):
+				if os.path.isfile(folder_finished_file):
+					logging.info(
+						"Reparsing %s because ignore_substitutions changed to %s",
+						name,
+						ignore_substitutions,
+					)
 				this_args = {'amplicon_name':name,
 							 'amplicon_info_file':amplicon_info_file,
 							 'crispresso_run_folder':crispresso_run_folder,
