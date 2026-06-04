@@ -32,6 +32,74 @@ A simple import sanity check is:
 python -c "import CRISPRSCope; print(CRISPRSCope.__version__)"
 ```
 
+## Docker
+
+CRISPRSCope can also be run from a Docker image. The image contains the
+software environment, but your sequencing data, settings file, barcode file,
+amplicon file, Bowtie2 index, and output directory should stay outside the
+image and be mounted at runtime.
+
+Build the image from the repository root:
+
+```bash
+docker build -t crisprscope:local .
+```
+
+That local image is useful for testing on your own computer, but it only targets
+your current Docker architecture.
+
+Check that the command-line tools are available:
+
+```bash
+docker run --rm crisprscope:local python -c "import CRISPRSCope; print(CRISPRSCope.__version__)"
+docker run --rm crisprscope:local bowtie2 --version
+docker run --rm crisprscope:local samtools --version
+docker run --rm crisprscope:local CRISPResso --version
+```
+
+Run an analysis by mounting the folder that contains your settings file and
+input data. In this example, everything is under the current directory and is
+available inside the container as `/data`:
+
+```bash
+docker run --rm -v "$PWD:/data" crisprscope:local CRISPRSCope /data/example/example_settings.txt
+```
+
+For Docker Desktop from PowerShell, use `${PWD}`:
+
+```powershell
+docker run --rm -v "${PWD}:/data" crisprscope:local CRISPRSCope /data/example/example_settings.txt
+```
+
+The paths in the settings file must point to files visible inside the
+container. Relative paths are resolved relative to the settings file, so keeping
+the settings file, inputs, references, and results under the same mounted
+directory is the simplest approach.
+
+To publish a Docker Hub image that supports both Intel/AMD and ARM machines,
+use Docker Buildx:
+
+```bash
+docker login
+docker buildx build --platform linux/amd64,linux/arm64 -t DOCKERHUB_USERNAME/crisprscope:latest --push .
+```
+
+To publish both a versioned tag and `latest`:
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t DOCKERHUB_USERNAME/crisprscope:0.1.4 \
+  -t DOCKERHUB_USERNAME/crisprscope:latest \
+  --push .
+```
+
+This repository also includes a GitHub Actions workflow at
+`.github/workflows/dockerhub.yml` that publishes a multi-architecture image to
+Docker Hub. Add repository secrets named `DOCKERHUB_USERNAME` and
+`DOCKERHUB_TOKEN`, then run the workflow manually or push a version tag such as
+`v0.1.4`. The workflow builds and smoke-tests the `linux/amd64` image on a
+native Intel/AMD GitHub runner before publishing the multi-architecture image.
+
 ## Running The Pipeline
 
 CRISPRSCope expects a tab-delimited settings file as its main input:

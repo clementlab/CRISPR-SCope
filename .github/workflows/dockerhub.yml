@@ -1,0 +1,79 @@
+name: Docker Hub
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+env:
+  IMAGE_NAME: crisprscope
+
+jobs:
+  test-amd64:
+    name: Test linux/amd64 image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build amd64 image
+        run: docker build --platform linux/amd64 -t crisprscope:amd64-test .
+
+      - name: Smoke test CRISPRSCope import
+        run: docker run --rm crisprscope:amd64-test python -c "import CRISPRSCope; print(CRISPRSCope.__version__)"
+
+      - name: Smoke test Bowtie2
+        run: docker run --rm crisprscope:amd64-test bowtie2 --version
+
+      - name: Smoke test Samtools
+        run: docker run --rm crisprscope:amd64-test samtools --version
+
+      - name: Smoke test CRISPResso2
+        run: docker run --rm crisprscope:amd64-test CRISPResso --version
+
+  publish:
+    name: Build and publish multi-arch image
+    needs: test-amd64
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,prefix=sha-
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
