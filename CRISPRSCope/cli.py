@@ -126,6 +126,34 @@ def _parse_float_setting(settings, key, default, minimum=None):
 	return value
 
 
+def _parse_editing_rate_ci_config(settings_file):
+	"""Parse and validate opt-in editing-rate confidence interval settings."""
+	from CRISPRSCope.editing_rate_ci import EditingRateCIConfig
+
+	settings = _parse_settings_file(settings_file)
+	enabled = _parse_bool_setting(settings, 'write_editing_rate_ci', default=False)
+	bootstrap_iterations = _parse_int_setting(
+		settings,
+		'editing_rate_ci_bootstrap_iterations',
+		10_000,
+		minimum=100,
+	)
+	confidence_level = _parse_float_setting(
+		settings,
+		'editing_rate_ci_confidence_level',
+		0.95,
+	)
+	if not 0 < confidence_level < 1:
+		raise ValueError("editing_rate_ci_confidence_level must be greater than 0 and less than 1")
+	seed = _parse_int_setting(settings, 'editing_rate_ci_seed', 42, minimum=0)
+	return EditingRateCIConfig(
+		enabled=enabled,
+		bootstrap_iterations=bootstrap_iterations,
+		confidence_level=confidence_level,
+		seed=seed,
+	)
+
+
 def _settings_value_is_path(value: str) -> bool:
 	return str(value).strip().lower() not in ("", "true", "yes", "1", "false", "no", "0", "none")
 
@@ -566,6 +594,7 @@ def main():
 		debug_rejected_rescue_reads_bam, debug_require_strict_amplicon_alignment,
 		partial_rescue_min_mean_read_quality, settings_file
 		) = parse_settings(sys.argv)
+	editing_rate_ci_config = _parse_editing_rate_ci_config(settings_file)
 	end_settings = time.time() - start_settings
 	#print(f"Parse Settings: {end_settings}")
 
@@ -668,6 +697,21 @@ def main():
 	amp_score_plot_obj = plot_amp_score(output_root)
 	if amp_score_plot_obj is not None:
 		filtered_summary_plot_objects.append(amp_score_plot_obj)
+
+	if editing_rate_ci_config.enabled:
+		start_editing_rate_ci = time.time()
+		editing_rate_ci_plot_objects = write_editing_rate_ci_output(
+			output_root=output_root,
+			cell_quality_to_analyze=cell_quality_to_analyze,
+			min_reads_per_amplicon_per_cell=min_reads_per_amplicon_per_cell,
+			config=editing_rate_ci_config,
+			n_processes=n_processes,
+		)
+		filtered_summary_plot_objects.extend(editing_rate_ci_plot_objects)
+		logging.info(
+			"Generated editing-rate confidence intervals in %.2f seconds",
+			time.time() - start_editing_rate_ci,
+		)
 
 
 	# # filtered_read_count_plot_obj = generate_read_depth_boxplots(output_root, cell_quality_to_analyze)
@@ -1939,6 +1983,47 @@ def parse_settings(args):
 
 
 	return (r1, r2, constant1, constant2, allow_barcode_mismatches,barcode_file, amplicon_file, primer_lookup_len, adapter_DNA, amp_file_dir, alt_alleles_file, bowtie2_index, crispresso_dir, output_root, n_processes, keep_intermediate_files, ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze, write_h5ad, h5ad_output, h5ad_export_config, debug_rescued_reads_bam, debug_rejected_rescue_reads_bam, debug_require_strict_amplicon_alignment, partial_rescue_min_mean_read_quality, settings_file)
+
+
+def write_editing_rate_ci_output(
+	output_root,
+	cell_quality_to_analyze,
+	min_reads_per_amplicon_per_cell,
+	config,
+	n_processes,
+):
+	"""Compute, write, and plot first-pass editing-rate confidence intervals."""
+	from CRISPRSCope.editing_rate_ci import (
+		compute_editing_rate_confidence_intervals,
+		write_editing_rate_ci_plots,
+	)
+
+	editing_summary_path = output_root + ".editingSummary.txt"
+	quality_scores_path = output_root + ".amplicon_score.txt"
+	output_path = output_root + ".editingRateConfidenceIntervals.txt"
+	editing_summary = pd.read_csv(editing_summary_path, sep="\t", index_col=0)
+	quality_scores = pd.read_csv(quality_scores_path, sep="\t", index_col=0)
+	results = compute_editing_rate_confidence_intervals(
+		editing_summary=editing_summary,
+		quality_scores=quality_scores,
+		high_quality_codes=cell_quality_to_analyze,
+		min_reads_per_amplicon_per_cell=min_reads_per_amplicon_per_cell,
+		config=config,
+		n_processes=n_processes,
+	)
+	results.to_csv(output_path, sep="\t", index=False, na_rep="NA", float_format="%.6f")
+	logging.info("Wrote editing-rate confidence interval table to %s", output_path)
+
+	plot_metadata = write_editing_rate_ci_plots(results, output_root)
+	return [
+		PlotObject(
+			plot_name=metadata["plot_name"],
+			plot_title=metadata["plot_title"],
+			plot_label=metadata["plot_label"],
+			plot_datas=[("Editing-rate confidence intervals", output_path)],
+		)
+		for metadata in plot_metadata
+	]
 
 
 def write_h5ad_output(output_root, settings_file, h5ad_output=None, h5ad_export_config=None, n_processes=None):

@@ -153,6 +153,10 @@ include_high_score_high_depth	True
 include_high_score_low_depth	True
 include_low_score_high_depth	False
 include_low_score_low_depth	False
+write_editing_rate_ci	True
+editing_rate_ci_bootstrap_iterations	10000
+editing_rate_ci_confidence_level	0.95
+editing_rate_ci_seed	42
 write_h5ad	True
 h5ad_output	results/demo_run.h5ad
 h5ad_wt_max_mod_pct	20
@@ -235,6 +239,10 @@ You may also use `genome` instead of `bowtie2_index`; internally the pipeline re
 | `alt_alleles_file` | not used | Optional alternate allele definition file. |
 | `min_total_reads_per_barcode` | `10` | Minimum total reads required for a barcode to be considered downstream. |
 | `min_reads_per_amplicon_per_cell` | `0` | Minimum reads per amplicon per cell for scoring/filtering. |
+| `write_editing_rate_ci` | `False` | Enables pointwise bootstrap confidence intervals for first-pass cell/allele editing rates. |
+| `editing_rate_ci_bootstrap_iterations` | `10000` | Number of bootstrap resamples per amplicon; must be at least 100. |
+| `editing_rate_ci_confidence_level` | `0.95` | Pointwise confidence level; must be greater than 0 and less than 1. |
+| `editing_rate_ci_seed` | `42` | Non-negative base seed used for reproducible per-amplicon resampling. |
 | `write_h5ad` | `True` | Enables `.h5ad` export after the main run. |
 | `h5ad_output` | `<output_root>.h5ad` | Output path for the generated `.h5ad` file. |
 
@@ -248,6 +256,18 @@ If none of these flags are provided, the pipeline defaults to including only `HQ
 | `include_high_score_low_depth` | Include high-score, low-depth cells (`HQ_LO`). |
 | `include_low_score_high_depth` | Include low-score, high-depth cells (`LQ_HI`). |
 | `include_low_score_low_depth` | Include low-score, low-depth cells (`LQ_LO`). |
+
+### Editing-Rate Confidence Intervals
+
+When `write_editing_rate_ci` is enabled, CRISPRSCope resamples cells with replacement and computes pointwise percentile-bootstrap intervals from the first-pass inferred allele percentages in `editingSummary.txt`. Calls with missing modification percentages or coverage below `min_reads_per_amplicon_per_cell` are excluded independently for each amplicon.
+
+The output reports three estimates for each amplicon:
+
+- all analyzable cells with an eligible first-pass call
+- cells in the quality categories enabled by the `include_*` settings
+- the paired difference between the high-quality and all-cell estimates
+
+These intervals quantify cell-sampling uncertainty within the current run; they do not represent uncertainty across biological replicates.
 
 ### h5ad Zygosity Parameters
 
@@ -273,6 +293,9 @@ results/demo_run.crispresso.filtered/
 results/demo_run.amplicon_score.txt
 results/demo_run.filteredEditingSummary.txt
 results/demo_run.filteredEditingSummaryPseudobulk.txt
+results/demo_run.editingRateConfidenceIntervals.txt
+results/demo_run.10_EditingRateConfidenceIntervals.{png,pdf}
+results/demo_run.11_EditingRateQualityDelta.{png,pdf}
 results/demo_run.h5ad
 ```
 
