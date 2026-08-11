@@ -59,6 +59,56 @@ def _percentile_interval(values: Sequence[float], confidence_level: float) -> Tu
     return float(lower), float(upper)
 
 
+def _bootstrap_means(
+    values: np.ndarray,
+    iterations: int,
+    rng: np.random.Generator,
+    batch_size: int,
+) -> np.ndarray:
+    """Bootstrap a mean using a fixed number of draws from eligible values."""
+    values = np.asarray(values, dtype=float)
+    n_values = len(values)
+    bootstrap = np.empty(iterations, dtype=float)
+    completed = 0
+    while completed < iterations:
+        this_batch_size = min(batch_size, iterations - completed)
+        sampled_indices = rng.integers(0, n_values, size=(this_batch_size, n_values))
+        bootstrap[completed:completed + this_batch_size] = np.take(values, sampled_indices).mean(axis=1)
+        completed += this_batch_size
+    return bootstrap
+
+
+def _bootstrap_stratified_delta(
+    hq_values: np.ndarray,
+    non_hq_values: np.ndarray,
+    iterations: int,
+    rng: np.random.Generator,
+    batch_size: int,
+) -> np.ndarray:
+    """Bootstrap HQ-minus-all while fixing observed HQ/non-HQ sample sizes."""
+    hq_values = np.asarray(hq_values, dtype=float)
+    non_hq_values = np.asarray(non_hq_values, dtype=float)
+    n_hq = len(hq_values)
+    n_non_hq = len(non_hq_values)
+    n_all = n_hq + n_non_hq
+    bootstrap = np.empty(iterations, dtype=float)
+    completed = 0
+    while completed < iterations:
+        this_batch_size = min(batch_size, iterations - completed)
+        hq_indices = rng.integers(0, n_hq, size=(this_batch_size, n_hq))
+        hq_sums = np.take(hq_values, hq_indices).sum(axis=1)
+        if n_non_hq:
+            non_hq_indices = rng.integers(0, n_non_hq, size=(this_batch_size, n_non_hq))
+            non_hq_sums = np.take(non_hq_values, non_hq_indices).sum(axis=1)
+        else:
+            non_hq_sums = np.zeros(this_batch_size, dtype=float)
+        hq_means = hq_sums / n_hq
+        all_means = (hq_sums + non_hq_sums) / n_all
+        bootstrap[completed:completed + this_batch_size] = hq_means - all_means
+        completed += this_batch_size
+    return bootstrap
+
+
 def _bootstrap_one_amplicon(job: Dict) -> Dict:
     """Compute estimates and paired bootstrap intervals for one amplicon."""
     amplicon = job["amplicon"]
@@ -80,47 +130,33 @@ def _bootstrap_one_amplicon(job: Dict) -> Dict:
     hq_estimate = _point_estimate(mod_values, valid_hq)
     delta_estimate = hq_estimate - all_estimate if np.isfinite(all_estimate) and np.isfinite(hq_estimate) else np.nan
 
-    all_bootstrap: List[float] = []
-    hq_bootstrap: List[float] = []
-    delta_bootstrap: List[float] = []
-    n_rows = len(mod_values)
+    all_values = mod_values[valid_all]
+    hq_values = mod_values[valid_hq]
+    non_hq_values = mod_values[valid_all & ~hq_mask]
+    seed_sequence = np.random.SeedSequence([base_seed, amplicon_index])
+    all_seed, hq_seed, delta_seed = seed_sequence.spawn(3)
 
-    if n_rows > 0 and n_all >= 2:
-        rng = np.random.default_rng(np.random.SeedSequence([base_seed, amplicon_index]))
-        mod_filled = np.where(valid_all, mod_values, 0.0)
-        hq_mod_filled = np.where(valid_hq, mod_values, 0.0)
-        all_valid_int = valid_all.astype(np.int8)
-        hq_valid_int = valid_hq.astype(np.int8)
+    all_bootstrap = np.array([], dtype=float)
+    if n_all >= 2:
+        all_bootstrap = _bootstrap_means(
+            all_values, iterations, np.random.default_rng(all_seed), batch_size
+        )
 
-        completed = 0
-        while completed < iterations:
-            this_batch_size = min(batch_size, iterations - completed)
-            sampled_indices = rng.integers(0, n_rows, size=(this_batch_size, n_rows))
+    hq_bootstrap = np.array([], dtype=float)
+    if n_hq >= 2:
+        hq_bootstrap = _bootstrap_means(
+            hq_values, iterations, np.random.default_rng(hq_seed), batch_size
+        )
 
-            sampled_all_denominator = np.take(all_valid_int, sampled_indices).sum(axis=1)
-            sampled_all_numerator = np.take(mod_filled, sampled_indices).sum(axis=1)
-            sampled_all = np.divide(
-                sampled_all_numerator,
-                sampled_all_denominator,
-                out=np.full(this_batch_size, np.nan, dtype=float),
-                where=sampled_all_denominator > 0,
-            )
-
-            sampled_hq_denominator = np.take(hq_valid_int, sampled_indices).sum(axis=1)
-            sampled_hq_numerator = np.take(hq_mod_filled, sampled_indices).sum(axis=1)
-            sampled_hq = np.divide(
-                sampled_hq_numerator,
-                sampled_hq_denominator,
-                out=np.full(this_batch_size, np.nan, dtype=float),
-                where=sampled_hq_denominator > 0,
-            )
-
-            all_bootstrap.extend(sampled_all[np.isfinite(sampled_all)].tolist())
-            if n_hq >= 2:
-                hq_bootstrap.extend(sampled_hq[np.isfinite(sampled_hq)].tolist())
-                valid_delta = np.isfinite(sampled_all) & np.isfinite(sampled_hq)
-                delta_bootstrap.extend((sampled_hq[valid_delta] - sampled_all[valid_delta]).tolist())
-            completed += this_batch_size
+    delta_bootstrap = np.array([], dtype=float)
+    if n_all >= 2 and n_hq >= 2:
+        delta_bootstrap = _bootstrap_stratified_delta(
+            hq_values,
+            non_hq_values,
+            iterations,
+            np.random.default_rng(delta_seed),
+            batch_size,
+        )
 
     all_lower, all_upper = _percentile_interval(all_bootstrap, confidence_level)
     hq_lower, hq_upper = _percentile_interval(hq_bootstrap, confidence_level)
