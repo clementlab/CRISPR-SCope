@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 import CRISPRSCope.cli as cli
+from CRISPRSCope.h5ad.loaders import _parse_and_write_parquet
 from CRISPRSCope.cli import (
     generate_amplicon_score,
     parse_crispresso_outputs,
@@ -131,6 +132,15 @@ def _write_first_pass_summ(path, rows):
 
 def _write_filtered_crispresso_fastq(path, records):
     with gzip.open(path, "wt") as fout:
+        for header, sequence, annotation in records:
+            fout.write(header + "\n")
+            fout.write(sequence + "\n")
+            fout.write(annotation + "\n")
+            fout.write("a" * len(sequence) + "\n")
+
+
+def _write_plain_filtered_crispresso_fastq(path, records):
+    with open(path, "w") as fout:
         for header, sequence, annotation in records:
             fout.write(header + "\n")
             fout.write(sequence + "\n")
@@ -408,3 +418,72 @@ def test_filtered_editing_summary_respects_ignore_substitutions(tmp_path):
     filtered_summary = pd.read_csv(f"{output_root}.filteredEditingSummary.txt", sep="\t", index_col=0)
     assert filtered_summary.loc["cellA", "totCount.ampA"] == 80
     assert filtered_summary.loc["cellA", "modPct.ampA"] == 0
+
+
+def test_filtered_editing_summary_accepts_plain_text_crispresso_output_with_gz_suffix(tmp_path):
+    output_root = str(tmp_path / "run")
+    pd.DataFrame({"Color": ["HQ_HI"]}, index=["cellA"]).to_csv(f"{output_root}.amplicon_score.txt", sep="\t")
+
+    first_pass_folder = tmp_path / "CRISPResso_on_ampA"
+    first_pass_folder.mkdir()
+    _write_first_pass_summ(
+        tmp_path / "CRISPResso_on_ampA.summ",
+        ["cellA\t100\t50\tNA\t80\t50\tNA\t1\tU,M\tU,D\t40,40\t80\t50\n"],
+    )
+
+    filtered_folder = tmp_path / "CRISPResso_filtered_on_ampA"
+    filtered_folder.mkdir()
+    _write_plain_filtered_crispresso_fastq(
+        filtered_folder / "CRISPResso_output.fastq.gz",
+        [
+            ("@ampA:Reference:DEL=_INS=_SUB=:cellA:1", "ACGT", "+ ALN=Reference DEL= INS= SUB= ALN_REF=ACGT ALN_SEQ=ACGT"),
+            ("@ampA:Reference:DEL=12_INS=_SUB=:cellA:2", "ACGT", "+ ALN=Reference DEL=12 INS= SUB= ALN_REF=ACGT ALN_SEQ=ACGT"),
+        ],
+    )
+
+    write_filtered_editing_summary_from_filtered_crispresso(
+        amplicon_names=["ampA"],
+        crispresso_information={"ampA": {"status": "Completed", "crispresso_run_folder": str(first_pass_folder)}},
+        crispresso_filtered_information={"ampA": {"status": "Completed", "crispresso_run_folder": str(filtered_folder)}},
+        output_root=output_root,
+        ignore_substitutions=False,
+    )
+
+    filtered_summary = pd.read_csv(f"{output_root}.filteredEditingSummary.txt", sep="\t", index_col=0)
+    assert filtered_summary.loc["cellA", "totCount.ampA"] == 80
+    assert filtered_summary.loc["cellA", "modPct.ampA"] == 50
+
+
+def test_h5ad_loader_accepts_plain_text_crispresso_output_with_gz_suffix(tmp_path):
+    input_fastq = tmp_path / "CRISPResso_on_ampA" / "CRISPResso_output.fastq.gz"
+    input_fastq.parent.mkdir()
+    _write_plain_filtered_crispresso_fastq(
+        input_fastq,
+        [
+            ("@ampA:Reference:DEL=_INS=_SUB=:cellA:1", "ACGT", "+ ALN=Reference"),
+            ("@ampA:Reference:DEL=_INS=_SUB=:cellA:2", "ACGT", "+ ALN=Reference"),
+            ("@ampA:Reference:DEL=_INS=_SUB=:cellB:1", "TGCA", "+ ALN=Reference"),
+        ],
+    )
+
+    output_parquet = tmp_path / "ampA.parquet"
+    result = _parse_and_write_parquet(input_fastq, output_parquet)
+
+    assert result == str(output_parquet)
+    parsed = pd.read_parquet(output_parquet).sort_values(
+        ["cell_barcode", "allele_sequence"]
+    ).reset_index(drop=True)
+    assert parsed.to_dict("records") == [
+        {
+            "cell_barcode": "cellA",
+            "amplicon_name": "ampA",
+            "allele_sequence": "ACGT",
+            "count": 2,
+        },
+        {
+            "cell_barcode": "cellB",
+            "amplicon_name": "ampA",
+            "allele_sequence": "TGCA",
+            "count": 1,
+        },
+    ]

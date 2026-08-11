@@ -30,6 +30,7 @@ from adjustText import adjust_text
 import random
 import dnaio
 from CRISPRSCope import __version__
+from CRISPRSCope.io_utils import open_text_maybe_gzip
 
 # Constants and default settings
 MIN_TOTAL_READS_PER_BARCODE_DEFAULT = 10
@@ -3706,10 +3707,11 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 				"-w", "2",
 				"--fastq_output",
 				"--no_rerun",
-				"--force_merge_pairs",
 				"--exclude_bp_from_left", "0",
 				"--exclude_bp_from_right", "0",
 			])
+			if not alleles:
+				crispresso_args.append("--crispresso_merge")
 			crispresso_run_folder = os.path.join(crispresso_dir,'CRISPResso_on_'+amplicon_name)
 			crispresso_cmd = shlex.join(crispresso_args) + " > " + shlex.quote(log_file) + " 2>&1 && touch " + shlex.quote(finished_file)
 			crispresso_information[amplicon_name]['crispresso_command'] = crispresso_cmd
@@ -3894,7 +3896,7 @@ def parse_one_crispresso_output(this_args):
 	"""
 		Parse a single CRISPResso2 output folder into per-cell allele summaries.
 
-	Reads the CRISPResso_output.fastq.gz file, extracts:
+	Reads the CRISPResso output FASTQ file, extracts:
 		- Cell barcode
 		- Reference alignment
 		- Indel/substitution status
@@ -3976,93 +3978,93 @@ def parse_one_crispresso_output(this_args):
 	num_crispresso_references = 0
 	num_references = len(input_ref_allele_counts.split(","))
 	logging.debug('Parsing CRISPResso output for ' + amplicon_name)
-	fastq_input_handle =  gzip.open(crispresso_output_fastq,'rt')
-	next_fastq_id = fastq_input_handle.readline()
-	while(next_fastq_id):
-		#read through fastq in sets of 4
-		fastq_id = next_fastq_id.split(" ")[0] #fastp adds ' merged_199_234' so trim that off
-		fastq_seq = fastq_input_handle.readline().strip()
-		fastq_plus = fastq_input_handle.readline().strip()
-		fastq_qual = fastq_input_handle.readline()
+	with open_text_maybe_gzip(crispresso_output_fastq,'rt') as fastq_input_handle:
 		next_fastq_id = fastq_input_handle.readline()
+		while(next_fastq_id):
+			#read through fastq in sets of 4
+			fastq_id = next_fastq_id.split(" ")[0] #fastp adds ' merged_199_234' so trim that off
+			fastq_seq = fastq_input_handle.readline().strip()
+			fastq_plus = fastq_input_handle.readline().strip()
+			fastq_qual = fastq_input_handle.readline()
+			next_fastq_id = fastq_input_handle.readline()
 
-		tot_count += 1
-		if "ALN=NA " in fastq_plus: # Read did not align
-			continue
-		crispresso2_aligned_count += 1
-		id_els = fastq_id.strip().split(":")
-		cell = id_els[-1]
+			tot_count += 1
+			if "ALN=NA " in fastq_plus: # Read did not align
+				continue
+			crispresso2_aligned_count += 1
+			id_els = fastq_id.strip().split(":")
+			cell = id_els[-1]
 
-		known_amp_left = False
-		known_amp_right = False
-		if fastq_seq[0:amp_arm_check_len] in ok_left_sides:
-			known_amp_left = True
-		if fastq_seq[-1*amp_arm_check_len:] in ok_right_sides:
-			known_amp_right = True
+			known_amp_left = False
+			known_amp_right = False
+			if fastq_seq[0:amp_arm_check_len] in ok_left_sides:
+				known_amp_left = True
+			if fastq_seq[-1*amp_arm_check_len:] in ok_right_sides:
+				known_amp_right = True
 
-		if not ok_left_sides or not ok_right_sides:
-			#print('mismatch: ' + fastq_seq[0:amp_arm_check_len] + ' with ' + str(ok_left_sides))
-			#print('mismatch: ' + fastq_seq[-1*amp_arm_check_len:] + ' with ' + str(ok_right_sides))
-			continue
+			if not ok_left_sides or not ok_right_sides:
+				#print('mismatch: ' + fastq_seq[0:amp_arm_check_len] + ' with ' + str(ok_left_sides))
+				#print('mismatch: ' + fastq_seq[-1*amp_arm_check_len:] + ' with ' + str(ok_right_sides))
+				continue
 
-		aln_ref = ""
-		#match = re.search(" ALN=(\S+) ", fastq_plus)
-		match = re.search(r" ALN=(\S+) ", fastq_plus)
-		if match:
-			aln_ref = match.group(1)
-		#discard reads that align ambiguously
-		if '&' in aln_ref:
-			continue
+			aln_ref = ""
+			#match = re.search(" ALN=(\S+) ", fastq_plus)
+			match = re.search(r" ALN=(\S+) ", fastq_plus)
+			if match:
+				aln_ref = match.group(1)
+			#discard reads that align ambiguously
+			if '&' in aln_ref:
+				continue
 
-		if cell not in data:
-			data[cell] = {'mod':0,'unmod':0}
-			alleles[cell] = {}
-			allele_sequence_dict[cell] = {}
+			if cell not in data:
+				data[cell] = {'mod':0,'unmod':0}
+				alleles[cell] = {}
+				allele_sequence_dict[cell] = {}
 
-		if aln_ref not in data[cell]:
-			data[cell][aln_ref] = {'mod':0,'unmod':0}
-			if aln_ref not in seen_refs:
-				seen_refs.append(aln_ref)
+			if aln_ref not in data[cell]:
+				data[cell][aln_ref] = {'mod':0,'unmod':0}
+				if aln_ref not in seen_refs:
+					seen_refs.append(aln_ref)
 
 
-		allele = "NA"
+			allele = "NA"
 
-		# Formation of allele_key should only consider the quant window in the gRNA
-		if ignore_substitutions:
-			match = re.search("(DEL=.* INS=.*) SUB=.* ALN_REF", fastq_plus)
-			unmod_allele_str = "DEL= INS="
-		else:
-			match = re.search("(DEL=.* INS=.* SUB=.*) ALN_REF", fastq_plus)
-			unmod_allele_str = "DEL= INS= SUB="
-
-		if match:
-			allele = match.group(1)
-			
-			# Check for gRNA input
-			# if gRNA, where in the amplicon sequence?
-			# Check for allele key values outside of gRNA
-			# if outside of gRNA, convert to WT read
-			# We don't expect CRISPR edits outside of gRNA region
-			
-			if allele == unmod_allele_str:
-				data[cell]['unmod'] += 1
-				data[cell][aln_ref]['unmod'] += 1
+			# Formation of allele_key should only consider the quant window in the gRNA
+			if ignore_substitutions:
+				match = re.search("(DEL=.* INS=.*) SUB=.* ALN_REF", fastq_plus)
+				unmod_allele_str = "DEL= INS="
 			else:
-				data[cell]['mod'] += 1
-			data[cell][aln_ref]['mod'] += 1
-		allele_key = aln_ref + ":" + allele
+				match = re.search("(DEL=.* INS=.* SUB=.*) ALN_REF", fastq_plus)
+				unmod_allele_str = "DEL= INS= SUB="
+
+			if match:
+				allele = match.group(1)
+			
+				# Check for gRNA input
+				# if gRNA, where in the amplicon sequence?
+				# Check for allele key values outside of gRNA
+				# if outside of gRNA, convert to WT read
+				# We don't expect CRISPR edits outside of gRNA region
+			
+				if allele == unmod_allele_str:
+					data[cell]['unmod'] += 1
+					data[cell][aln_ref]['unmod'] += 1
+				else:
+					data[cell]['mod'] += 1
+				data[cell][aln_ref]['mod'] += 1
+			allele_key = aln_ref + ":" + allele
 		
-		if allele_key not in alleles[cell]:
-			alleles[cell][allele_key] = 0
-			# new layer with sequence + count
-			allele_sequence_dict[cell][allele_key] = {}
+			if allele_key not in alleles[cell]:
+				alleles[cell][allele_key] = 0
+				# new layer with sequence + count
+				allele_sequence_dict[cell][allele_key] = {}
 		
-		if fastq_seq not in allele_sequence_dict[cell][allele_key]:
-			allele_sequence_dict[cell][allele_key][fastq_seq] = 0
+			if fastq_seq not in allele_sequence_dict[cell][allele_key]:
+				allele_sequence_dict[cell][allele_key][fastq_seq] = 0
 		
-		alleles[cell][allele_key] += 1
-		allele_sequence_dict[cell][allele_key][fastq_seq] += 1
-		cell_read_counts[cell] += 1
+			alleles[cell][allele_key] += 1
+			allele_sequence_dict[cell][allele_key][fastq_seq] += 1
+			cell_read_counts[cell] += 1
 
 	# Checking for proper allele_sequence_dict formation
 
@@ -4723,7 +4725,7 @@ def _parse_filtered_crispresso_allele_output(crispresso_output_fastq, read_suppo
 	if not crispresso_output_fastq or not os.path.isfile(crispresso_output_fastq):
 		return results
 
-	with gzip.open(crispresso_output_fastq, "rt") as fin:
+	with open_text_maybe_gzip(crispresso_output_fastq, "rt") as fin:
 		while True:
 			header = fin.readline()
 			if not header:

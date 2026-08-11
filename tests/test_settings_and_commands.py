@@ -150,6 +150,41 @@ def test_crispresso_command_omits_empty_or_na_guides(tmp_path, guide):
 	assert " -g " not in result["ampA"]["crispresso_command"]
 
 
+def test_filtered_crispresso_command_stays_single_end_without_crispresso_merge(tmp_path):
+	output_root = str(tmp_path / "run")
+	crispresso_dir = str(tmp_path / "run.crispresso.filtered")
+	seq_dir = tmp_path / "run.seq_by_amplicon"
+	actual_crispresso_dir = tmp_path / "run.crispresso.filtered.filtered"
+	run_folder = actual_crispresso_dir / "CRISPResso_on_ampA"
+	seq_dir.mkdir()
+	run_folder.mkdir(parents=True)
+	allele_fastq = seq_dir / "04_alleles_qc_cells.ampA.fq.gz"
+	allele_fastq.write_text("\n")
+	(actual_crispresso_dir / "ampA.finished").write_text("\n")
+	(run_folder / "CRISPResso2_info.json").write_text("{}\n")
+
+	result = cli.run_crispresso_commands(
+		["ampA"],
+		{
+			"ampA": {
+				"aln_count": "1",
+				"amp_seqs": "ACGTACGT",
+				"guide_seq": "ACGT",
+			}
+		},
+		output_root,
+		crispresso_dir,
+		False,
+		1,
+		alleles=True,
+	)
+
+	command = result["ampA"]["crispresso_command"]
+	assert " -r1 " in command
+	assert " -r2 " not in command
+	assert "--crispresso_merge" not in command
+
+
 def test_example_files_are_tab_delimited():
 	repo_root = os.path.dirname(os.path.dirname(__file__))
 	for rel_path in ["example/example_settings.txt", "example/amplicon_file.txt"]:
