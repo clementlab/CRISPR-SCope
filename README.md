@@ -153,10 +153,6 @@ include_high_score_high_depth	True
 include_high_score_low_depth	True
 include_low_score_high_depth	False
 include_low_score_low_depth	False
-write_editing_rate_ci	True
-editing_rate_ci_bootstrap_iterations	10000
-editing_rate_ci_confidence_level	0.95
-editing_rate_ci_seed	42
 write_h5ad	True
 h5ad_output	results/demo_run.h5ad
 h5ad_wt_max_mod_pct	20
@@ -239,10 +235,14 @@ You may also use `genome` instead of `bowtie2_index`; internally the pipeline re
 | `alt_alleles_file` | not used | Optional alternate allele definition file. |
 | `min_total_reads_per_barcode` | `10` | Minimum total reads required for a barcode to be considered downstream. |
 | `min_reads_per_amplicon_per_cell` | `0` | Minimum reads per amplicon per cell for scoring/filtering. |
-| `write_editing_rate_ci` | `False` | Enables pointwise bootstrap confidence intervals for first-pass cell/allele editing rates. |
+| `write_editing_rate_ci` | `True` | Enables pointwise bootstrap confidence intervals for first-pass cell/allele editing rates; set to `False` to disable. |
 | `editing_rate_ci_bootstrap_iterations` | `10000` | Number of bootstrap resamples per amplicon; must be at least 100. |
 | `editing_rate_ci_confidence_level` | `0.95` | Pointwise confidence level; must be greater than 0 and less than 1. |
 | `editing_rate_ci_seed` | `42` | Non-negative base seed used for reproducible per-amplicon resampling. |
+| `write_editing_rate_depth_stability` | `True` | Enables finite-cohort downsampling analysis for all analyzable and configured high-quality cells; set to `False` to disable. |
+| `editing_rate_depth_stability_iterations` | `1000` | Number of without-replacement subsamples at each retained-cell percentage; must be at least 100. |
+| `editing_rate_depth_stability_percentages` | `10,25,50,75,90` | Strictly increasing, unique retained-cell percentages between 0 and 100; an exact 100% reference is added automatically. |
+| `editing_rate_depth_stability_relative_min_hq_edit_pct` | `1.0` | Minimum full configured-HQ editing percentage required to include an amplicon in the relative depth-stability plot; must be greater than 0 and no greater than 100. |
 | `write_h5ad` | `True` | Enables `.h5ad` export after the main run. |
 | `h5ad_output` | `<output_root>.h5ad` | Output path for the generated `.h5ad` file. |
 
@@ -259,7 +259,7 @@ If none of these flags are provided, the pipeline defaults to including only `HQ
 
 ### Editing-Rate Confidence Intervals
 
-When `write_editing_rate_ci` is enabled, CRISPRSCope resamples cells with replacement and computes pointwise percentile-bootstrap intervals from the first-pass inferred allele percentages in `editingSummary.txt`. Calls with missing modification percentages or coverage below `min_reads_per_amplicon_per_cell` are excluded independently for each amplicon.
+By default, CRISPRSCope resamples cells with replacement and computes pointwise percentile-bootstrap intervals from the first-pass inferred allele percentages in `editingSummary.txt`. Set `write_editing_rate_ci` to `False` to disable this analysis. Calls with missing modification percentages or coverage below `min_reads_per_amplicon_per_cell` are excluded independently for each amplicon.
 
 The output reports three estimates for each amplicon:
 
@@ -268,6 +268,18 @@ The output reports three estimates for each amplicon:
 - the paired difference between the high-quality and all-cell estimates
 
 These intervals quantify cell-sampling uncertainty within the current run; they do not represent uncertainty across biological replicates.
+
+### Editing-Rate Cell-Depth Stability
+
+By default, CRISPRSCope repeatedly downsamples eligible cells without replacement. Set `write_editing_rate_depth_stability` to `False` to disable this analysis. Downsampling is performed independently for all analyzable cells and for cells in the configured quality categories. Requested percentages are applied to each amplicon's eligible cohort, so the actual number of sampled cells is reported for every result.
+
+Within each iteration, the percentage levels are nested: one random ordering of eligible cells supplies the first 10%, 25%, 50%, 75%, and 90%. The output reports the median editing rate, a central interval controlled by `editing_rate_ci_confidence_level`, and absolute deviations from the full-cohort estimate. An exact 100% reference is appended automatically. Random sampling uses `editing_rate_ci_seed`, making identical inputs and settings reproducible across serial and parallel runs.
+
+The absolute plot reports percentage-point deviations and includes every amplicon with a usable cohort. The relative plot reports each cohort's deviation as a percentage of its own full-cohort editing rate. To avoid unstable ratios near zero, the relative plot includes an amplicon only when its full configured-HQ editing rate is at least `editing_rate_depth_stability_relative_min_hq_edit_pct` (1% by default). Both plots are ordered by the full configured-HQ editing rate, highest first; amplicons without a usable HQ estimate appear last in the absolute plot and are omitted from the relative plot.
+
+If no amplicons meet the configured HQ threshold, CRISPRSCope omits the relative PNG/PDF cleanly while retaining the shared stability table and absolute plot.
+
+The stability bands answer how much the inferred editing rate changes as cells from this run are retained or removed. They are finite-cohort downsampling diagnostics, not confidence intervals across biological replicates.
 
 ### h5ad Zygosity Parameters
 
@@ -296,6 +308,9 @@ results/demo_run.filteredEditingSummaryPseudobulk.txt
 results/demo_run.editingRateConfidenceIntervals.txt
 results/demo_run.10_EditingRateConfidenceIntervals.{png,pdf}
 results/demo_run.11_EditingRateQualityDelta.{png,pdf}
+results/demo_run.editingRateDepthStability.txt
+results/demo_run.12_EditingRateDepthStability.{png,pdf}
+results/demo_run.13_EditingRateRelativeDepthStability.{png,pdf}
 results/demo_run.h5ad
 ```
 

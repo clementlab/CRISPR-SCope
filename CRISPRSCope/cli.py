@@ -127,11 +127,11 @@ def _parse_float_setting(settings, key, default, minimum=None):
 
 
 def _parse_editing_rate_ci_config(settings_file):
-	"""Parse and validate opt-in editing-rate confidence interval settings."""
+	"""Parse and validate editing-rate confidence interval settings."""
 	from CRISPRSCope.editing_rate_ci import EditingRateCIConfig
 
 	settings = _parse_settings_file(settings_file)
-	enabled = _parse_bool_setting(settings, 'write_editing_rate_ci', default=False)
+	enabled = _parse_bool_setting(settings, 'write_editing_rate_ci', default=True)
 	bootstrap_iterations = _parse_int_setting(
 		settings,
 		'editing_rate_ci_bootstrap_iterations',
@@ -151,6 +151,75 @@ def _parse_editing_rate_ci_config(settings_file):
 		bootstrap_iterations=bootstrap_iterations,
 		confidence_level=confidence_level,
 		seed=seed,
+	)
+
+
+def _parse_editing_rate_depth_stability_config(settings_file):
+	"""Parse and validate editing-rate depth-stability settings."""
+	from CRISPRSCope.editing_rate_ci import EditingRateDepthStabilityConfig
+
+	settings = _parse_settings_file(settings_file)
+	enabled = _parse_bool_setting(
+		settings,
+		'write_editing_rate_depth_stability',
+		default=True,
+	)
+	iterations = _parse_int_setting(
+		settings,
+		'editing_rate_depth_stability_iterations',
+		1_000,
+		minimum=100,
+	)
+	raw_percentages = settings.get(
+		'editing_rate_depth_stability_percentages',
+		'10,25,50,75,90',
+	)
+	try:
+		percentage_parts = [part.strip() for part in str(raw_percentages).split(',')]
+		if not percentage_parts or any(not part for part in percentage_parts):
+			raise ValueError("expected a non-empty comma-separated list")
+		percentages = tuple(float(part) for part in percentage_parts)
+	except Exception as e:
+		raise ValueError(
+			"Invalid value for editing_rate_depth_stability_percentages: "
+			f"{raw_percentages!r} ({e})"
+		)
+	if any(not np.isfinite(value) or not 0 < value < 100 for value in percentages):
+		raise ValueError(
+			"editing_rate_depth_stability_percentages values must be greater than 0 and less than 100"
+		)
+	if any(left >= right for left, right in zip(percentages, percentages[1:])):
+		raise ValueError(
+			"editing_rate_depth_stability_percentages must be strictly increasing and unique"
+		)
+	relative_min_hq_edit_pct = _parse_float_setting(
+		settings,
+		'editing_rate_depth_stability_relative_min_hq_edit_pct',
+		1.0,
+	)
+	if (
+		not np.isfinite(relative_min_hq_edit_pct)
+		or relative_min_hq_edit_pct <= 0
+		or relative_min_hq_edit_pct > 100
+	):
+		raise ValueError(
+			"editing_rate_depth_stability_relative_min_hq_edit_pct must be greater than 0 and no greater than 100"
+		)
+	confidence_level = _parse_float_setting(
+		settings,
+		'editing_rate_ci_confidence_level',
+		0.95,
+	)
+	if not 0 < confidence_level < 1:
+		raise ValueError("editing_rate_ci_confidence_level must be greater than 0 and less than 1")
+	seed = _parse_int_setting(settings, 'editing_rate_ci_seed', 42, minimum=0)
+	return EditingRateDepthStabilityConfig(
+		enabled=enabled,
+		iterations=iterations,
+		percentages=percentages,
+		confidence_level=confidence_level,
+		seed=seed,
+		relative_min_hq_edit_pct=relative_min_hq_edit_pct,
 	)
 
 
@@ -595,6 +664,7 @@ def main():
 		partial_rescue_min_mean_read_quality, settings_file
 		) = parse_settings(sys.argv)
 	editing_rate_ci_config = _parse_editing_rate_ci_config(settings_file)
+	editing_rate_depth_stability_config = _parse_editing_rate_depth_stability_config(settings_file)
 	end_settings = time.time() - start_settings
 	#print(f"Parse Settings: {end_settings}")
 
@@ -711,6 +781,21 @@ def main():
 		logging.info(
 			"Generated editing-rate confidence intervals in %.2f seconds",
 			time.time() - start_editing_rate_ci,
+		)
+
+	if editing_rate_depth_stability_config.enabled:
+		start_editing_rate_depth_stability = time.time()
+		depth_stability_plot_objects = write_editing_rate_depth_stability_output(
+			output_root=output_root,
+			cell_quality_to_analyze=cell_quality_to_analyze,
+			min_reads_per_amplicon_per_cell=min_reads_per_amplicon_per_cell,
+			config=editing_rate_depth_stability_config,
+			n_processes=n_processes,
+		)
+		filtered_summary_plot_objects.extend(depth_stability_plot_objects)
+		logging.info(
+			"Generated editing-rate depth stability analysis in %.2f seconds",
+			time.time() - start_editing_rate_depth_stability,
 		)
 
 
@@ -2021,6 +2106,47 @@ def write_editing_rate_ci_output(
 			plot_title=metadata["plot_title"],
 			plot_label=metadata["plot_label"],
 			plot_datas=[("Editing-rate confidence intervals", output_path)],
+		)
+		for metadata in plot_metadata
+	]
+
+
+def write_editing_rate_depth_stability_output(
+	output_root,
+	cell_quality_to_analyze,
+	min_reads_per_amplicon_per_cell,
+	config,
+	n_processes,
+):
+	"""Compute, write, and plot first-pass editing-rate depth stability."""
+	from CRISPRSCope.editing_rate_ci import (
+		compute_editing_rate_depth_stability,
+		write_editing_rate_depth_stability_plot,
+	)
+
+	editing_summary_path = output_root + ".editingSummary.txt"
+	quality_scores_path = output_root + ".amplicon_score.txt"
+	output_path = output_root + ".editingRateDepthStability.txt"
+	editing_summary = pd.read_csv(editing_summary_path, sep="\t", index_col=0)
+	quality_scores = pd.read_csv(quality_scores_path, sep="\t", index_col=0)
+	results = compute_editing_rate_depth_stability(
+		editing_summary=editing_summary,
+		quality_scores=quality_scores,
+		high_quality_codes=cell_quality_to_analyze,
+		min_reads_per_amplicon_per_cell=min_reads_per_amplicon_per_cell,
+		config=config,
+		n_processes=n_processes,
+	)
+	results.to_csv(output_path, sep="\t", index=False, na_rep="NA", float_format="%.6f")
+	logging.info("Wrote editing-rate depth stability table to %s", output_path)
+
+	plot_metadata = write_editing_rate_depth_stability_plot(results, output_root)
+	return [
+		PlotObject(
+			plot_name=metadata["plot_name"],
+			plot_title=metadata["plot_title"],
+			plot_label=metadata["plot_label"],
+			plot_datas=[("Editing-rate depth stability", output_path)],
 		)
 		for metadata in plot_metadata
 	]
