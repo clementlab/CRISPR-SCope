@@ -7,6 +7,8 @@ import pytest
 
 from CRISPRSCope.editing_rate_ci import (
     EditingRateCIConfig,
+    _benjamini_hochberg,
+    _significant_plot_rows,
     compute_editing_rate_confidence_intervals,
     write_editing_rate_ci_plots,
 )
@@ -47,7 +49,11 @@ def test_compute_uses_cell_weighted_rates_and_configured_hq_codes():
     assert result.loc["ampA", "all_estimate_pct"] == 50.0
     assert result.loc["ampA", "hq_estimate_pct"] == 75.0
     assert result.loc["ampA", "hq_minus_all_pct"] == 25.0
-    assert result.loc["ampA", "status"] == "ok"
+    assert result.loc["ampA", "non_hq_estimate_pct"] == 0.0
+    assert result.loc["ampA", "non_hq_n_cells"] == 1
+    assert result.loc["ampA", "hq_minus_non_hq_pct"] == 75.0
+    assert np.isnan(result.loc["ampA", "permutation_p_value"])
+    assert result.loc["ampA", "status"] == "insufficient_non_hq_cells"
     assert 0 <= result.loc["ampA", "all_ci_lower_pct"] <= result.loc["ampA", "all_ci_upper_pct"] <= 100
 
 
@@ -91,7 +97,81 @@ def test_insufficient_hq_cells_retains_estimate_but_not_interval():
     assert result["hq_estimate_pct"] == 0.0
     assert np.isnan(result["hq_ci_lower_pct"])
     assert np.isnan(result["delta_ci_lower_pct"])
-    assert result["status"] == "insufficient_hq_cells"
+    assert result["status"] == "insufficient_hq_cells;insufficient_non_hq_cells"
+
+
+def test_two_sided_permutation_detects_separation_and_is_sign_symmetric():
+    index = [f"cell{i}" for i in range(20)]
+    quality_scores = pd.DataFrame(
+        {"Color": ["HQ_HI"] * 10 + ["LQ_HI"] * 10},
+        index=index,
+    )
+    config = EditingRateCIConfig(
+        enabled=True,
+        bootstrap_iterations=200,
+        permutation_iterations=2_000,
+        seed=13,
+    )
+
+    def compute(hq_value, non_hq_value):
+        editing_summary = pd.DataFrame(
+            {
+                "totCount.ampA": [10] * 20,
+                "modPct.ampA": [hq_value] * 10 + [non_hq_value] * 10,
+            },
+            index=index,
+        )
+        return compute_editing_rate_confidence_intervals(
+            editing_summary,
+            quality_scores,
+            ["HQ_HI"],
+            1,
+            config,
+            n_processes=1,
+        ).iloc[0]
+
+    positive = compute(100.0, 0.0)
+    negative = compute(0.0, 100.0)
+
+    assert positive["permutation_p_value"] < 0.01
+    assert positive["bh_adjusted_p_value"] == positive["permutation_p_value"]
+    assert negative["permutation_p_value"] == positive["permutation_p_value"]
+    assert positive["valid_permutation_replicates"] == 2_000
+
+
+def test_identical_groups_have_permutation_p_value_one():
+    index = [f"cell{i}" for i in range(8)]
+    editing_summary = pd.DataFrame(
+        {"totCount.ampA": [10] * 8, "modPct.ampA": [50.0] * 8},
+        index=index,
+    )
+    quality_scores = pd.DataFrame(
+        {"Color": ["HQ_HI"] * 4 + ["LQ_HI"] * 4},
+        index=index,
+    )
+
+    result = compute_editing_rate_confidence_intervals(
+        editing_summary,
+        quality_scores,
+        ["HQ_HI"],
+        1,
+        EditingRateCIConfig(
+            enabled=True,
+            bootstrap_iterations=200,
+            permutation_iterations=200,
+        ),
+        n_processes=1,
+    ).iloc[0]
+
+    assert result["permutation_p_value"] == 1.0
+    assert result["bh_adjusted_p_value"] == 1.0
+
+
+def test_benjamini_hochberg_adjusts_only_finite_p_values():
+    adjusted = _benjamini_hochberg([0.01, 0.04, 0.03, np.nan])
+
+    assert adjusted[:3].tolist() == pytest.approx([0.03, 0.04, 0.04])
+    assert np.isnan(adjusted[3])
 
 
 def test_missing_matching_count_column_is_rejected():
@@ -118,6 +198,10 @@ def test_plot_writer_creates_primary_and_delta_artifacts(tmp_path):
         EditingRateCIConfig(enabled=True, bootstrap_iterations=200),
         n_processes=1,
     )
+    results.loc[:, "bh_adjusted_p_value"] = [0.01, 0.20]
+
+    significant = _significant_plot_rows(results)
+    assert significant["amplicon"].tolist() == ["ampA"]
 
     metadata = write_editing_rate_ci_plots(results, str(tmp_path / "run"))
 
@@ -125,3 +209,27 @@ def test_plot_writer_creates_primary_and_delta_artifacts(tmp_path):
     for suffix in [".10_EditingRateConfidenceIntervals", ".11_EditingRateQualityDelta"]:
         assert Path(str(tmp_path / "run") + suffix + ".png").is_file()
         assert Path(str(tmp_path / "run") + suffix + ".pdf").is_file()
+
+
+def test_plot_writer_skips_artifacts_when_no_amplicon_is_significant(tmp_path, caplog):
+    caplog.set_level("INFO")
+    editing_summary, quality_scores = _example_inputs()
+    results = compute_editing_rate_confidence_intervals(
+        editing_summary,
+        quality_scores,
+        ["HQ_HI"],
+        1,
+        EditingRateCIConfig(
+            enabled=True,
+            bootstrap_iterations=200,
+            permutation_iterations=200,
+        ),
+        n_processes=1,
+    )
+
+    metadata = write_editing_rate_ci_plots(results, str(tmp_path / "run"))
+
+    assert metadata == []
+    assert "No amplicons passed" in caplog.text
+    assert not list(tmp_path.glob("run.10_EditingRateConfidenceIntervals.*"))
+    assert not list(tmp_path.glob("run.11_EditingRateQualityDelta.*"))

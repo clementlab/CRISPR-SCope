@@ -11,6 +11,7 @@ def test_editing_rate_ci_is_enabled_with_reproducible_defaults(tmp_path):
 
     assert config.enabled is True
     assert config.bootstrap_iterations == 10_000
+    assert config.permutation_iterations == 10_000
     assert config.confidence_level == 0.95
     assert config.seed == 42
 
@@ -20,6 +21,7 @@ def test_editing_rate_ci_settings_are_parsed(tmp_path):
     settings.write_text(
         "write_editing_rate_ci\tTrue\n"
         "editing_rate_ci_bootstrap_iterations\t2500\n"
+        "editing_rate_ci_permutation_iterations\t3000\n"
         "editing_rate_ci_confidence_level\t0.9\n"
         "editing_rate_ci_seed\t123\n"
     )
@@ -28,6 +30,7 @@ def test_editing_rate_ci_settings_are_parsed(tmp_path):
 
     assert config.enabled is True
     assert config.bootstrap_iterations == 2500
+    assert config.permutation_iterations == 3000
     assert config.confidence_level == 0.9
     assert config.seed == 123
 
@@ -45,6 +48,7 @@ def test_editing_rate_ci_can_be_disabled(tmp_path):
     "line,match",
     [
         ("editing_rate_ci_bootstrap_iterations\t99\n", "must be >= 100"),
+        ("editing_rate_ci_permutation_iterations\t99\n", "must be >= 100"),
         ("editing_rate_ci_confidence_level\t1.0\n", "greater than 0 and less than 1"),
         ("editing_rate_ci_seed\t-1\n", "must be >= 0"),
     ],
