@@ -155,6 +155,7 @@ include_low_score_high_depth	False
 include_low_score_low_depth	False
 write_editing_rate_ci	True
 editing_rate_ci_bootstrap_iterations	10000
+editing_rate_ci_permutation_iterations	10000
 editing_rate_ci_confidence_level	0.95
 editing_rate_ci_seed	42
 write_h5ad	True
@@ -241,6 +242,7 @@ You may also use `genome` instead of `bowtie2_index`; internally the pipeline re
 | `min_reads_per_amplicon_per_cell` | `0` | Minimum reads per amplicon per cell for scoring/filtering. |
 | `write_editing_rate_ci` | `False` | Enables pointwise bootstrap confidence intervals for first-pass cell/allele editing rates. |
 | `editing_rate_ci_bootstrap_iterations` | `10000` | Number of bootstrap resamples per amplicon; must be at least 100. |
+| `editing_rate_ci_permutation_iterations` | `10000` | Number of HQ-label permutations used for each two-sided significance test; must be at least 100. |
 | `editing_rate_ci_confidence_level` | `0.95` | Pointwise confidence level; must be greater than 0 and less than 1. |
 | `editing_rate_ci_seed` | `42` | Non-negative base seed used for reproducible per-amplicon resampling. |
 | `write_h5ad` | `True` | Enables `.h5ad` export after the main run. |
@@ -267,7 +269,9 @@ The output reports three estimates for each amplicon:
 - cells in the quality categories enabled by the `include_*` settings
 - the paired difference between the high-quality and all-cell estimates
 
-These intervals quantify cell-sampling uncertainty within the current run; they do not represent uncertainty across biological replicates.
+For each amplicon, CRISPRSCope also permutes the configured high-quality labels among eligible cells while preserving the observed high-quality cell count. The two-sided permutation p-value tests the observed high-quality-minus-all difference against this null distribution. Benjamini-Hochberg-adjusted p-values control the false discovery rate across testable amplicons in the run. The confidence-interval and editing-stability figures include only amplicons with an adjusted p-value at or below 0.05; the output table retains every amplicon. If none pass, both figures are omitted.
+
+These intervals and significance tests quantify cell-sampling behavior within the current run. They do not represent uncertainty across biological replicates or establish a causal effect of cell-quality selection.
 
 ### h5ad Zygosity Parameters
 

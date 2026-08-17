@@ -1,6 +1,7 @@
-"""Bootstrap confidence intervals for per-amplicon editing rates."""
+"""Bootstrap confidence intervals and significance tests for editing rates."""
 
 from dataclasses import dataclass
+import logging
 import multiprocessing as mp
 from typing import Dict, Iterable, List, Sequence, Tuple
 
@@ -19,13 +20,20 @@ RESULT_COLUMNS = [
     "hq_ci_lower_pct",
     "hq_ci_upper_pct",
     "hq_n_cells",
+    "non_hq_estimate_pct",
+    "non_hq_n_cells",
     "hq_minus_all_pct",
+    "hq_minus_non_hq_pct",
     "delta_ci_lower_pct",
     "delta_ci_upper_pct",
+    "permutation_p_value",
+    "bh_adjusted_p_value",
     "valid_all_bootstrap_replicates",
     "valid_hq_bootstrap_replicates",
     "valid_delta_bootstrap_replicates",
+    "valid_permutation_replicates",
     "bootstrap_iterations",
+    "permutation_iterations",
     "confidence_level",
     "seed",
     "status",
@@ -38,6 +46,7 @@ class EditingRateCIConfig:
 
     enabled: bool = False
     bootstrap_iterations: int = 10_000
+    permutation_iterations: int = 10_000
     confidence_level: float = 0.95
     seed: int = 42
     batch_size: int = 64
@@ -109,6 +118,62 @@ def _bootstrap_stratified_delta(
     return bootstrap
 
 
+def _permutation_hq_minus_all(
+    all_values: np.ndarray,
+    n_hq: int,
+    iterations: int,
+    rng: np.random.Generator,
+    batch_size: int,
+) -> np.ndarray:
+    """Permute fixed-size HQ labels and return HQ-minus-all null effects."""
+    all_values = np.asarray(all_values, dtype=float)
+    n_all = len(all_values)
+    all_mean = all_values.mean()
+    null_effects = np.empty(iterations, dtype=float)
+    completed = 0
+    while completed < iterations:
+        this_batch_size = min(batch_size, iterations - completed)
+        # Selecting the smallest random keys gives an independent, uniformly
+        # sampled subset without replacement for every permutation row.
+        random_keys = rng.random((this_batch_size, n_all))
+        hq_indices = np.argpartition(random_keys, n_hq - 1, axis=1)[:, :n_hq]
+        sampled_hq = np.take(all_values, hq_indices).mean(axis=1)
+        null_effects[completed:completed + this_batch_size] = sampled_hq - all_mean
+        completed += this_batch_size
+    return null_effects
+
+
+def _two_sided_permutation_p_value(null_effects: np.ndarray, observed_effect: float) -> float:
+    """Return a finite-sample-corrected two-sided Monte Carlo p-value."""
+    null_effects = np.asarray(null_effects, dtype=float)
+    finite_null = null_effects[np.isfinite(null_effects)]
+    if finite_null.size == 0 or not np.isfinite(observed_effect):
+        return np.nan
+    extreme_count = np.count_nonzero(np.abs(finite_null) >= abs(observed_effect))
+    return float((extreme_count + 1) / (finite_null.size + 1))
+
+
+def _benjamini_hochberg(p_values: Sequence[float]) -> np.ndarray:
+    """Adjust finite p-values with the Benjamini-Hochberg FDR procedure."""
+    p_values = np.asarray(p_values, dtype=float)
+    adjusted = np.full(p_values.shape, np.nan, dtype=float)
+    finite_indices = np.flatnonzero(np.isfinite(p_values))
+    if finite_indices.size == 0:
+        return adjusted
+
+    finite_p_values = p_values[finite_indices]
+    order = np.argsort(finite_p_values, kind="mergesort")
+    ordered_p_values = finite_p_values[order]
+    ranks = np.arange(1, len(ordered_p_values) + 1, dtype=float)
+    ordered_adjusted = ordered_p_values * len(ordered_p_values) / ranks
+    ordered_adjusted = np.minimum.accumulate(ordered_adjusted[::-1])[::-1]
+    ordered_adjusted = np.clip(ordered_adjusted, 0.0, 1.0)
+
+    adjusted_indices = finite_indices[order]
+    adjusted[adjusted_indices] = ordered_adjusted
+    return adjusted
+
+
 def _bootstrap_one_amplicon(job: Dict) -> Dict:
     """Compute estimates and paired bootstrap intervals for one amplicon."""
     amplicon = job["amplicon"]
@@ -117,7 +182,8 @@ def _bootstrap_one_amplicon(job: Dict) -> Dict:
     count_values = np.asarray(job["count_values"], dtype=float)
     hq_mask = np.asarray(job["hq_mask"], dtype=bool)
     min_reads = job["min_reads"]
-    iterations = job["iterations"]
+    bootstrap_iterations = job["bootstrap_iterations"]
+    permutation_iterations = job["permutation_iterations"]
     confidence_level = job["confidence_level"]
     base_seed = job["seed"]
     batch_size = job["batch_size"]
@@ -126,26 +192,33 @@ def _bootstrap_one_amplicon(job: Dict) -> Dict:
     valid_hq = valid_all & hq_mask
     n_all = int(valid_all.sum())
     n_hq = int(valid_hq.sum())
+    n_non_hq = n_all - n_hq
     all_estimate = _point_estimate(mod_values, valid_all)
     hq_estimate = _point_estimate(mod_values, valid_hq)
+    non_hq_estimate = _point_estimate(mod_values, valid_all & ~hq_mask)
     delta_estimate = hq_estimate - all_estimate if np.isfinite(all_estimate) and np.isfinite(hq_estimate) else np.nan
+    hq_non_hq_delta = (
+        hq_estimate - non_hq_estimate
+        if np.isfinite(hq_estimate) and np.isfinite(non_hq_estimate)
+        else np.nan
+    )
 
     all_values = mod_values[valid_all]
     hq_values = mod_values[valid_hq]
     non_hq_values = mod_values[valid_all & ~hq_mask]
     seed_sequence = np.random.SeedSequence([base_seed, amplicon_index])
-    all_seed, hq_seed, delta_seed = seed_sequence.spawn(3)
+    all_seed, hq_seed, delta_seed, permutation_seed = seed_sequence.spawn(4)
 
     all_bootstrap = np.array([], dtype=float)
     if n_all >= 2:
         all_bootstrap = _bootstrap_means(
-            all_values, iterations, np.random.default_rng(all_seed), batch_size
+            all_values, bootstrap_iterations, np.random.default_rng(all_seed), batch_size
         )
 
     hq_bootstrap = np.array([], dtype=float)
     if n_hq >= 2:
         hq_bootstrap = _bootstrap_means(
-            hq_values, iterations, np.random.default_rng(hq_seed), batch_size
+            hq_values, bootstrap_iterations, np.random.default_rng(hq_seed), batch_size
         )
 
     delta_bootstrap = np.array([], dtype=float)
@@ -153,9 +226,23 @@ def _bootstrap_one_amplicon(job: Dict) -> Dict:
         delta_bootstrap = _bootstrap_stratified_delta(
             hq_values,
             non_hq_values,
-            iterations,
+            bootstrap_iterations,
             np.random.default_rng(delta_seed),
             batch_size,
+        )
+
+    permutation_null = np.array([], dtype=float)
+    permutation_p_value = np.nan
+    if n_hq >= 2 and n_non_hq >= 2:
+        permutation_null = _permutation_hq_minus_all(
+            all_values,
+            n_hq,
+            permutation_iterations,
+            np.random.default_rng(permutation_seed),
+            batch_size,
+        )
+        permutation_p_value = _two_sided_permutation_p_value(
+            permutation_null, delta_estimate
         )
 
     all_lower, all_upper = _percentile_interval(all_bootstrap, confidence_level)
@@ -167,6 +254,8 @@ def _bootstrap_one_amplicon(job: Dict) -> Dict:
         status_parts.append("insufficient_all_cells")
     if n_hq < 2:
         status_parts.append("insufficient_hq_cells")
+    if n_non_hq < 2:
+        status_parts.append("insufficient_non_hq_cells")
 
     return {
         "amplicon": amplicon,
@@ -178,13 +267,20 @@ def _bootstrap_one_amplicon(job: Dict) -> Dict:
         "hq_ci_lower_pct": hq_lower,
         "hq_ci_upper_pct": hq_upper,
         "hq_n_cells": n_hq,
+        "non_hq_estimate_pct": non_hq_estimate,
+        "non_hq_n_cells": n_non_hq,
         "hq_minus_all_pct": delta_estimate,
+        "hq_minus_non_hq_pct": hq_non_hq_delta,
         "delta_ci_lower_pct": delta_lower,
         "delta_ci_upper_pct": delta_upper,
+        "permutation_p_value": permutation_p_value,
+        "bh_adjusted_p_value": np.nan,
         "valid_all_bootstrap_replicates": len(all_bootstrap),
         "valid_hq_bootstrap_replicates": len(hq_bootstrap),
         "valid_delta_bootstrap_replicates": len(delta_bootstrap),
-        "bootstrap_iterations": iterations,
+        "valid_permutation_replicates": len(permutation_null),
+        "bootstrap_iterations": bootstrap_iterations,
+        "permutation_iterations": permutation_iterations,
         "confidence_level": confidence_level,
         "seed": base_seed,
         "status": ";".join(status_parts) if status_parts else "ok",
@@ -219,7 +315,8 @@ def compute_editing_rate_confidence_intervals(
                 "count_values": pd.to_numeric(editing_summary[count_column], errors="coerce").to_numpy(dtype=float),
                 "hq_mask": hq_mask,
                 "min_reads": min_reads_per_amplicon_per_cell,
-                "iterations": config.bootstrap_iterations,
+                "bootstrap_iterations": config.bootstrap_iterations,
+                "permutation_iterations": config.permutation_iterations,
                 "confidence_level": config.confidence_level,
                 "seed": config.seed,
                 "batch_size": config.batch_size,
@@ -235,7 +332,11 @@ def compute_editing_rate_confidence_intervals(
             results = pool.map(_bootstrap_one_amplicon, jobs)
     else:
         results = [_bootstrap_one_amplicon(job) for job in jobs]
-    return pd.DataFrame(results, columns=RESULT_COLUMNS)
+    result_frame = pd.DataFrame(results, columns=RESULT_COLUMNS)
+    result_frame["bh_adjusted_p_value"] = _benjamini_hochberg(
+        result_frame["permutation_p_value"]
+    )
+    return result_frame
 
 
 def _finite_interval_rows(results: pd.DataFrame, prefix: str) -> pd.Series:
@@ -246,13 +347,27 @@ def _finite_interval_rows(results: pd.DataFrame, prefix: str) -> pd.Series:
     )
 
 
+def _significant_plot_rows(results: pd.DataFrame) -> pd.DataFrame:
+    """Return amplicons with a finite BH-adjusted p-value at or below 0.05."""
+    adjusted_p_values = pd.to_numeric(results["bh_adjusted_p_value"], errors="coerce")
+    significant = adjusted_p_values.notna() & (adjusted_p_values <= 0.05)
+    return results.loc[significant].copy()
+
+
 def write_editing_rate_ci_plots(results: pd.DataFrame, output_root: str) -> List[Dict[str, str]]:
-    """Write HQ/all and paired-delta forest plots and return report metadata."""
+    """Plot significant HQ/all and paired-delta intervals for the report."""
     plot_metadata: List[Dict[str, str]] = []
     if results.empty:
         return plot_metadata
 
-    ordered = results.copy()
+    ordered = _significant_plot_rows(results)
+    if ordered.empty:
+        logging.info(
+            "No amplicons passed the BH-adjusted p-value threshold of 0.05; "
+            "skipping editing-rate confidence interval plots"
+        )
+        return plot_metadata
+
     ordered["all_estimate_pct"] = pd.to_numeric(ordered["all_estimate_pct"], errors="coerce")
     ordered = ordered.sort_values("all_estimate_pct", ascending=True, na_position="first").reset_index(drop=True)
 
@@ -299,7 +414,8 @@ def write_editing_rate_ci_plots(results: pd.DataFrame, output_root: str) -> List
                 "plot_title": "Amplicon editing-rate confidence intervals",
                 "plot_label": (
                     "Pointwise bootstrap confidence intervals for all analyzable "
-                    "and configured high-quality cells."
+                    "and configured high-quality cells among amplicons with a "
+                    "BH-adjusted permutation p-value at or below 0.05."
                 ),
             }
         )
@@ -344,7 +460,9 @@ def write_editing_rate_ci_plots(results: pd.DataFrame, output_root: str) -> List
                 "plot_title": "Editing-rate quality-selection sensitivity",
                 "plot_label": (
                     "Paired bootstrap interval for the configured high-quality "
-                    "estimate minus the all-analyzable-cell estimate."
+                    "estimate minus the all-analyzable-cell estimate among "
+                    "amplicons with a BH-adjusted permutation p-value at or "
+                    "below 0.05."
                 ),
             }
         )
