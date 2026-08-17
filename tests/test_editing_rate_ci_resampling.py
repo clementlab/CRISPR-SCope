@@ -6,6 +6,7 @@ from CRISPRSCope.editing_rate_ci import (
     EditingRateCIConfig,
     _bootstrap_means,
     _bootstrap_stratified_delta,
+    _permutation_hq_minus_all,
     compute_editing_rate_confidence_intervals,
 )
 
@@ -20,6 +21,17 @@ class RecordingRNG:
         assert low == 0
         self.sizes.append(size)
         return np.zeros(size, dtype=int)
+
+
+class PermutationRecordingRNG:
+    """Deterministic random-key generator that records permutation shapes."""
+
+    def __init__(self):
+        self.sizes = []
+
+    def random(self, size):
+        self.sizes.append(size)
+        return np.tile(np.arange(size[1], dtype=float), (size[0], 1))
 
 
 def test_bootstrap_mean_draws_observed_eligible_sample_size_each_time():
@@ -51,6 +63,21 @@ def test_stratified_delta_fixes_hq_and_non_hq_sample_sizes():
     assert bootstrap.tolist() == [6.0] * 5
 
 
+def test_permutation_preserves_hq_size_without_replacement():
+    rng = PermutationRecordingRNG()
+
+    null_effects = _permutation_hq_minus_all(
+        all_values=np.array([0.0, 10.0, 20.0, 30.0]),
+        n_hq=2,
+        iterations=5,
+        rng=rng,
+        batch_size=2,
+    )
+
+    assert rng.sizes == [(2, 4), (2, 4), (1, 4)]
+    assert null_effects.tolist() == [-10.0] * 5
+
+
 def test_adding_excluded_rows_does_not_change_any_interval():
     editing_summary = pd.DataFrame(
         {
@@ -77,6 +104,7 @@ def test_adding_excluded_rows_does_not_change_any_interval():
     config = EditingRateCIConfig(
         enabled=True,
         bootstrap_iterations=500,
+        permutation_iterations=500,
         seed=42,
         batch_size=25,
     )
@@ -102,6 +130,7 @@ def test_adding_excluded_rows_does_not_change_any_interval():
     assert original.loc[0, "valid_all_bootstrap_replicates"] == 500
     assert original.loc[0, "valid_hq_bootstrap_replicates"] == 500
     assert original.loc[0, "valid_delta_bootstrap_replicates"] == 500
+    assert original.loc[0, "valid_permutation_replicates"] == 500
 
 
 def test_delta_is_zero_when_all_eligible_cells_are_high_quality():
@@ -130,3 +159,7 @@ def test_delta_is_zero_when_all_eligible_cells_are_high_quality():
     assert result["delta_ci_lower_pct"] == 0.0
     assert result["delta_ci_upper_pct"] == 0.0
     assert result["valid_delta_bootstrap_replicates"] == 200
+    assert result["valid_permutation_replicates"] == 0
+    assert np.isnan(result["permutation_p_value"])
+    assert np.isnan(result["bh_adjusted_p_value"])
+    assert result["status"] == "insufficient_non_hq_cells"

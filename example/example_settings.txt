@@ -23,4 +23,9 @@ include_high_score_high_depth	True
 include_high_score_low_depth	False
 include_low_score_high_depth	False
 include_low_score_low_depth	False
+write_editing_rate_ci	False
+editing_rate_ci_bootstrap_iterations	10000
+editing_rate_ci_permutation_iterations	10000
+editing_rate_ci_confidence_level	0.95
+editing_rate_ci_seed	42
 write_h5ad	True

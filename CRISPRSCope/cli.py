@@ -139,6 +139,12 @@ def _parse_editing_rate_ci_config(settings_file):
 		10_000,
 		minimum=100,
 	)
+	permutation_iterations = _parse_int_setting(
+		settings,
+		'editing_rate_ci_permutation_iterations',
+		10_000,
+		minimum=100,
+	)
 	confidence_level = _parse_float_setting(
 		settings,
 		'editing_rate_ci_confidence_level',
@@ -150,6 +156,7 @@ def _parse_editing_rate_ci_config(settings_file):
 	return EditingRateCIConfig(
 		enabled=enabled,
 		bootstrap_iterations=bootstrap_iterations,
+		permutation_iterations=permutation_iterations,
 		confidence_level=confidence_level,
 		seed=seed,
 	)
