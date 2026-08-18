@@ -199,14 +199,19 @@ def test_plot_writer_creates_primary_and_delta_artifacts(tmp_path):
         n_processes=1,
     )
     results.loc[:, "bh_adjusted_p_value"] = [0.01, 0.20]
+    results.loc[:, "coverage_adjusted_bh_p_value"] = [0.01, 0.20]
 
     significant = _significant_plot_rows(results)
     assert significant["amplicon"].tolist() == ["ampA"]
 
     metadata = write_editing_rate_ci_plots(results, str(tmp_path / "run"))
 
-    assert len(metadata) == 2
-    for suffix in [".10_EditingRateConfidenceIntervals", ".11_EditingRateQualityDelta"]:
+    assert len(metadata) == 3
+    for suffix in [
+        ".10_EditingRateConfidenceIntervals",
+        ".11_EditingRateQualityDelta",
+        ".14_EditingRateCoverageAdjustedEffects",
+    ]:
         assert Path(str(tmp_path / "run") + suffix + ".png").is_file()
         assert Path(str(tmp_path / "run") + suffix + ".pdf").is_file()
 
@@ -227,9 +232,27 @@ def test_plot_writer_skips_artifacts_when_no_amplicon_is_significant(tmp_path, c
         n_processes=1,
     )
 
+    stale_paths = []
+    for suffix in [
+        ".10_EditingRateConfidenceIntervals",
+        ".11_EditingRateQualityDelta",
+        ".14_EditingRateCoverageAdjustedEffects",
+    ]:
+        for extension in [".png", ".pdf"]:
+            path = Path(str(tmp_path / "run") + suffix + extension)
+            path.write_text("stale")
+            stale_paths.append(path)
+
     metadata = write_editing_rate_ci_plots(results, str(tmp_path / "run"))
 
-    assert metadata == []
-    assert "No amplicons passed" in caplog.text
-    assert not list(tmp_path.glob("run.10_EditingRateConfidenceIntervals.*"))
-    assert not list(tmp_path.glob("run.11_EditingRateQualityDelta.*"))
+    assert len(metadata) == 1
+    assert metadata[0]["plot_name"].endswith(".14_EditingRateCoverageAdjustedEffects")
+    assert "No amplicons passed the coverage-adjusted" in caplog.text
+    assert all(
+        not path.exists()
+        for path in stale_paths
+        if not str(path).endswith(
+            (".14_EditingRateCoverageAdjustedEffects.png", ".14_EditingRateCoverageAdjustedEffects.pdf")
+        )
+    )
+    assert Path(str(tmp_path / "run") + ".14_EditingRateCoverageAdjustedEffects.png").is_file()

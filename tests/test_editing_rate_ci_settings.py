@@ -14,6 +14,8 @@ def test_editing_rate_ci_is_enabled_with_reproducible_defaults(tmp_path):
     assert config.permutation_iterations == 10_000
     assert config.confidence_level == 0.95
     assert config.seed == 42
+    assert config.coverage_exact_max_reads == 10
+    assert config.coverage_bin_width_reads == 5
 
 
 def test_editing_rate_ci_settings_are_parsed(tmp_path):
@@ -24,6 +26,8 @@ def test_editing_rate_ci_settings_are_parsed(tmp_path):
         "editing_rate_ci_permutation_iterations\t3000\n"
         "editing_rate_ci_confidence_level\t0.9\n"
         "editing_rate_ci_seed\t123\n"
+        "editing_rate_ci_coverage_exact_max_reads\t8\n"
+        "editing_rate_ci_coverage_bin_width_reads\t4\n"
     )
 
     config = cli._parse_editing_rate_ci_config(str(settings))
@@ -33,6 +37,8 @@ def test_editing_rate_ci_settings_are_parsed(tmp_path):
     assert config.permutation_iterations == 3000
     assert config.confidence_level == 0.9
     assert config.seed == 123
+    assert config.coverage_exact_max_reads == 8
+    assert config.coverage_bin_width_reads == 4
 
 
 def test_editing_rate_ci_can_be_disabled(tmp_path):
@@ -51,6 +57,8 @@ def test_editing_rate_ci_can_be_disabled(tmp_path):
         ("editing_rate_ci_permutation_iterations\t99\n", "must be >= 100"),
         ("editing_rate_ci_confidence_level\t1.0\n", "greater than 0 and less than 1"),
         ("editing_rate_ci_seed\t-1\n", "must be >= 0"),
+        ("editing_rate_ci_coverage_exact_max_reads\t-1\n", "must be >= 0"),
+        ("editing_rate_ci_coverage_bin_width_reads\t0\n", "must be >= 1"),
     ],
 )
 def test_editing_rate_ci_settings_reject_invalid_values(tmp_path, line, match):

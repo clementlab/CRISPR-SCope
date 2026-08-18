@@ -21,7 +21,7 @@ def test_cli_writer_creates_table_plots_and_report_links(tmp_path):
     editing_summary.to_csv(output_root + ".editingSummary.txt", sep="\t")
     quality_scores.to_csv(output_root + ".amplicon_score.txt", sep="\t")
 
-    plot_objects = cli.write_editing_rate_ci_output(
+    plot_objects, significant_amplicons = cli.write_editing_rate_ci_output(
         output_root=output_root,
         cell_quality_to_analyze=["HQ_HI"],
         min_reads_per_amplicon_per_cell=1,
@@ -39,7 +39,10 @@ def test_cli_writer_creates_table_plots_and_report_links(tmp_path):
     table = pd.read_csv(table_path, sep="\t")
     assert table.loc[0, "permutation_p_value"] < 0.01
     assert table.loc[0, "bh_adjusted_p_value"] <= 0.05
-    assert len(plot_objects) == 2
+    assert table.loc[0, "coverage_adjusted_permutation_p_value"] < 0.01
+    assert table.loc[0, "coverage_adjusted_bh_p_value"] <= 0.05
+    assert significant_amplicons == ["ampA"]
+    assert len(plot_objects) == 3
     assert all(plot.datas == [("Editing-rate confidence intervals", str(table_path))] for plot in plot_objects)
 
     report_path = tmp_path / "run.html"
@@ -57,7 +60,7 @@ def test_cli_writer_creates_table_plots_and_report_links(tmp_path):
     assert "run.editingRateConfidenceIntervals.txt" in report_text
 
 
-def test_cli_writer_keeps_table_but_omits_report_plots_without_significance(tmp_path):
+def test_cli_writer_keeps_table_and_comparison_plot_without_significance(tmp_path):
     output_root = str(tmp_path / "run")
     index = [f"cell{i}" for i in range(8)]
     pd.DataFrame(
@@ -69,7 +72,7 @@ def test_cli_writer_keeps_table_but_omits_report_plots_without_significance(tmp_
         index=index,
     ).to_csv(output_root + ".amplicon_score.txt", sep="\t")
 
-    plot_objects = cli.write_editing_rate_ci_output(
+    plot_objects, significant_amplicons = cli.write_editing_rate_ci_output(
         output_root=output_root,
         cell_quality_to_analyze=["HQ_HI"],
         min_reads_per_amplicon_per_cell=1,
@@ -84,9 +87,12 @@ def test_cli_writer_keeps_table_but_omits_report_plots_without_significance(tmp_
     table_path = tmp_path / "run.editingRateConfidenceIntervals.txt"
     assert table_path.is_file()
     assert pd.read_csv(table_path, sep="\t")["amplicon"].tolist() == ["ampA"]
-    assert plot_objects == []
+    assert significant_amplicons == []
+    assert len(plot_objects) == 1
+    assert plot_objects[0].name.endswith(".14_EditingRateCoverageAdjustedEffects")
     assert not list(tmp_path.glob("run.10_EditingRateConfidenceIntervals.*"))
     assert not list(tmp_path.glob("run.11_EditingRateQualityDelta.*"))
+    assert (tmp_path / "run.14_EditingRateCoverageAdjustedEffects.png").is_file()
 
 
 def test_depth_stability_writer_creates_table_plot_and_report_link(tmp_path):

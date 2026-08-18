@@ -152,12 +152,26 @@ def _parse_editing_rate_ci_config(settings_file):
 	if not 0 < confidence_level < 1:
 		raise ValueError("editing_rate_ci_confidence_level must be greater than 0 and less than 1")
 	seed = _parse_int_setting(settings, 'editing_rate_ci_seed', 42, minimum=0)
+	coverage_exact_max_reads = _parse_int_setting(
+		settings,
+		'editing_rate_ci_coverage_exact_max_reads',
+		10,
+		minimum=0,
+	)
+	coverage_bin_width_reads = _parse_int_setting(
+		settings,
+		'editing_rate_ci_coverage_bin_width_reads',
+		5,
+		minimum=1,
+	)
 	return EditingRateCIConfig(
 		enabled=enabled,
 		bootstrap_iterations=bootstrap_iterations,
 		permutation_iterations=permutation_iterations,
 		confidence_level=confidence_level,
 		seed=seed,
+		coverage_exact_max_reads=coverage_exact_max_reads,
+		coverage_bin_width_reads=coverage_bin_width_reads,
 	)
 
 
@@ -775,9 +789,16 @@ def main():
 	if amp_score_plot_obj is not None:
 		filtered_summary_plot_objects.append(amp_score_plot_obj)
 
+	from CRISPRSCope.editing_rate_ci import remove_editing_rate_plot_artifacts
+	remove_editing_rate_plot_artifacts(output_root)
+
+	editing_rate_significant_amplicons = None
 	if editing_rate_ci_config.enabled:
 		start_editing_rate_ci = time.time()
-		editing_rate_ci_plot_objects = write_editing_rate_ci_output(
+		(
+			editing_rate_ci_plot_objects,
+			editing_rate_significant_amplicons,
+		) = write_editing_rate_ci_output(
 			output_root=output_root,
 			cell_quality_to_analyze=cell_quality_to_analyze,
 			min_reads_per_amplicon_per_cell=min_reads_per_amplicon_per_cell,
@@ -798,6 +819,7 @@ def main():
 			min_reads_per_amplicon_per_cell=min_reads_per_amplicon_per_cell,
 			config=editing_rate_depth_stability_config,
 			n_processes=n_processes,
+			significant_amplicons=editing_rate_significant_amplicons,
 		)
 		filtered_summary_plot_objects.extend(depth_stability_plot_objects)
 		logging.info(
@@ -2084,8 +2106,9 @@ def write_editing_rate_ci_output(
 	config,
 	n_processes,
 ):
-	"""Compute, write, and plot first-pass editing-rate confidence intervals."""
+	"""Write editing-rate outputs and return plots plus significant amplicons."""
 	from CRISPRSCope.editing_rate_ci import (
+		_significant_plot_rows,
 		compute_editing_rate_confidence_intervals,
 		write_editing_rate_ci_plots,
 	)
@@ -2107,7 +2130,7 @@ def write_editing_rate_ci_output(
 	logging.info("Wrote editing-rate confidence interval table to %s", output_path)
 
 	plot_metadata = write_editing_rate_ci_plots(results, output_root)
-	return [
+	plot_objects = [
 		PlotObject(
 			plot_name=metadata["plot_name"],
 			plot_title=metadata["plot_title"],
@@ -2116,6 +2139,8 @@ def write_editing_rate_ci_output(
 		)
 		for metadata in plot_metadata
 	]
+	significant_amplicons = _significant_plot_rows(results)["amplicon"].astype(str).tolist()
+	return plot_objects, significant_amplicons
 
 
 def write_editing_rate_depth_stability_output(
@@ -2124,6 +2149,7 @@ def write_editing_rate_depth_stability_output(
 	min_reads_per_amplicon_per_cell,
 	config,
 	n_processes,
+	significant_amplicons=None,
 ):
 	"""Compute, write, and plot first-pass editing-rate depth stability."""
 	from CRISPRSCope.editing_rate_ci import (
@@ -2147,7 +2173,11 @@ def write_editing_rate_depth_stability_output(
 	results.to_csv(output_path, sep="\t", index=False, na_rep="NA", float_format="%.6f")
 	logging.info("Wrote editing-rate depth stability table to %s", output_path)
 
-	plot_metadata = write_editing_rate_depth_stability_plot(results, output_root)
+	plot_metadata = write_editing_rate_depth_stability_plot(
+		results,
+		output_root,
+		significant_amplicons=significant_amplicons,
+	)
 	return [
 		PlotObject(
 			plot_name=metadata["plot_name"],
