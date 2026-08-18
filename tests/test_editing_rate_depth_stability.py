@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 import pandas.testing as pdt
 
+import CRISPRSCope.editing_rate_ci as editing_rate_ci_module
+
 from CRISPRSCope.editing_rate_ci import (
     EditingRateDepthStabilityConfig,
     _create_depth_stability_figure,
@@ -397,3 +399,62 @@ def test_insufficient_cohorts_are_retained_but_not_plotted(tmp_path):
     assert not Path(
         str(tmp_path / "run") + ".13_EditingRateRelativeDepthStability.pdf"
     ).exists()
+
+
+def test_stability_plots_filter_to_significant_amplicons_and_remove_stale_outputs(
+    tmp_path,
+    caplog,
+    monkeypatch,
+):
+    caplog.set_level("INFO")
+    editing_summary, quality_scores = _example_inputs()
+    results = compute_editing_rate_depth_stability(
+        editing_summary,
+        quality_scores,
+        ["HQ_HI"],
+        5,
+        EditingRateDepthStabilityConfig(
+            enabled=True,
+            iterations=100,
+            percentages=(25.0, 75.0),
+        ),
+    )
+    output_root = str(tmp_path / "run")
+    original_create_figure = editing_rate_ci_module._create_depth_stability_figure
+    plotted_orders = []
+
+    def record_amplicon_order(*args, **kwargs):
+        plotted_orders.append(list(args[1]))
+        return original_create_figure(*args, **kwargs)
+
+    monkeypatch.setattr(
+        editing_rate_ci_module,
+        "_create_depth_stability_figure",
+        record_amplicon_order,
+    )
+
+    metadata = write_editing_rate_depth_stability_plot(
+        results,
+        output_root,
+        significant_amplicons={"ampA"},
+    )
+
+    assert metadata
+    assert plotted_orders
+    assert all(order == ["ampA"] for order in plotted_orders)
+    assert Path(output_root + ".12_EditingRateDepthStability.png").is_file()
+
+    metadata = write_editing_rate_depth_stability_plot(
+        results,
+        output_root,
+        significant_amplicons=set(),
+    )
+
+    assert metadata == []
+    assert "No significant amplicons" in caplog.text
+    for suffix in [
+        ".12_EditingRateDepthStability",
+        ".13_EditingRateRelativeDepthStability",
+    ]:
+        assert not Path(output_root + suffix + ".png").exists()
+        assert not Path(output_root + suffix + ".pdf").exists()

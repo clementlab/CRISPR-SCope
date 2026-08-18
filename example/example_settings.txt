@@ -28,4 +28,6 @@ editing_rate_ci_bootstrap_iterations	10000
 editing_rate_ci_permutation_iterations	10000
 editing_rate_ci_confidence_level	0.95
 editing_rate_ci_seed	42
+editing_rate_ci_coverage_exact_max_reads	10
+editing_rate_ci_coverage_bin_width_reads	5
 write_h5ad	True

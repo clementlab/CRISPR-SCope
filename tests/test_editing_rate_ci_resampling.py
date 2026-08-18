@@ -6,6 +6,7 @@ from CRISPRSCope.editing_rate_ci import (
     EditingRateCIConfig,
     _bootstrap_means,
     _bootstrap_stratified_delta,
+    _coverage_bin_ids,
     _permutation_hq_minus_all,
     compute_editing_rate_confidence_intervals,
 )
@@ -76,6 +77,117 @@ def test_permutation_preserves_hq_size_without_replacement():
 
     assert rng.sizes == [(2, 4), (2, 4), (1, 4)]
     assert null_effects.tolist() == [-10.0] * 5
+
+
+def test_coverage_bins_are_exact_through_ceiling_then_use_fixed_widths():
+    bin_ids = _coverage_bin_ids(
+        np.array([0, 5, 10, 11, 13, 15, 16, 20, 21]),
+        exact_max_reads=10,
+        bin_width_reads=5,
+    )
+
+    assert bin_ids.tolist() == [0, 5, 10, 11, 11, 11, 12, 12, 13]
+    assert bin_ids[3] == bin_ids[4]
+    assert bin_ids[1] != bin_ids[7]
+
+
+def test_coverage_adjustment_removes_effect_explained_by_coverage():
+    index = [f"group{i}" for i in range(100)] + [
+        f"rest_low{i}" for i in range(100)
+    ] + [f"rest_matched{i}" for i in range(100)]
+    editing_summary = pd.DataFrame(
+        {
+            "totCount.ampA": [20] * 100 + [1] * 100 + [20] * 100,
+            "modPct.ampA": [0.0] * 100 + [100.0] * 100 + [0.0] * 100,
+        },
+        index=index,
+    )
+    quality_scores = pd.DataFrame(
+        {"Color": ["HQ_HI"] * 100 + ["LQ_LO"] * 200},
+        index=index,
+    )
+
+    result = compute_editing_rate_confidence_intervals(
+        editing_summary,
+        quality_scores,
+        ["HQ_HI"],
+        min_reads_per_amplicon_per_cell=1,
+        config=EditingRateCIConfig(
+            bootstrap_iterations=200,
+            permutation_iterations=500,
+            seed=19,
+        ),
+        n_processes=1,
+    ).iloc[0]
+
+    assert result["permutation_p_value"] < 0.01
+    assert result["coverage_adjusted_group_minus_non_group_pct"] == 0.0
+    assert result["coverage_adjusted_permutation_p_value"] == 1.0
+    assert result["coverage_adjusted_group_retained_pct"] == 100.0
+    assert result["coverage_adjusted_non_group_retained_pct"] == 50.0
+
+
+def test_coverage_adjustment_detects_within_bin_group_effect_for_configured_code():
+    index = [f"group{i}" for i in range(50)] + [f"rest{i}" for i in range(50)]
+    editing_summary = pd.DataFrame(
+        {
+            "totCount.ampA": [13] * 50 + [11] * 50,
+            "modPct.ampA": [100.0] * 50 + [0.0] * 50,
+        },
+        index=index,
+    )
+    quality_scores = pd.DataFrame(
+        {"Color": ["LQ_LO"] * 50 + ["HQ_HI"] * 50},
+        index=index,
+    )
+
+    result = compute_editing_rate_confidence_intervals(
+        editing_summary,
+        quality_scores,
+        ["LQ_LO"],
+        min_reads_per_amplicon_per_cell=1,
+        config=EditingRateCIConfig(
+            bootstrap_iterations=200,
+            permutation_iterations=500,
+            seed=23,
+        ),
+        n_processes=1,
+    ).iloc[0]
+
+    assert result["coverage_adjusted_group_minus_non_group_pct"] == 100.0
+    assert result["coverage_adjusted_permutation_p_value"] < 0.01
+    assert result["coverage_adjusted_bh_p_value"] < 0.01
+    assert result["coverage_adjusted_mixed_bin_count"] == 1
+    assert result["coverage_adjusted_within_bin_coverage_difference_reads"] == 2.0
+
+
+def test_coverage_adjustment_reports_absent_common_support():
+    editing_summary = pd.DataFrame(
+        {
+            "totCount.ampA": [20, 20, 1, 1],
+            "modPct.ampA": [0.0, 50.0, 50.0, 100.0],
+        },
+        index=["g1", "g2", "r1", "r2"],
+    )
+    quality_scores = pd.DataFrame(
+        {"Color": ["HQ_HI", "HQ_HI", "LQ_LO", "LQ_LO"]},
+        index=editing_summary.index,
+    )
+
+    result = compute_editing_rate_confidence_intervals(
+        editing_summary,
+        quality_scores,
+        ["HQ_HI"],
+        1,
+        EditingRateCIConfig(bootstrap_iterations=200, permutation_iterations=200),
+        n_processes=1,
+    ).iloc[0]
+
+    assert result["coverage_adjusted_mixed_bin_count"] == 0
+    assert result["coverage_adjusted_group_n_cells"] == 0
+    assert np.isnan(result["coverage_adjusted_group_minus_non_group_pct"])
+    assert np.isnan(result["coverage_adjusted_permutation_p_value"])
+    assert result["coverage_adjusted_status"].startswith("no_mixed_coverage_bins")
 
 
 def test_adding_excluded_rows_does_not_change_any_interval():
