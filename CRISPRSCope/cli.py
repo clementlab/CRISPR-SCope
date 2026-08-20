@@ -3954,10 +3954,11 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 				"-w", "2",
 				"--fastq_output",
 				"--no_rerun",
-				"--force_merge_pairs",
 				"--exclude_bp_from_left", "0",
 				"--exclude_bp_from_right", "0",
 			])
+			if not alleles:
+				crispresso_args.append("--crispresso_merge")
 			crispresso_run_folder = os.path.join(crispresso_dir,'CRISPResso_on_'+amplicon_name)
 			crispresso_cmd = shlex.join(crispresso_args) + " > " + shlex.quote(log_file) + " 2>&1 && touch " + shlex.quote(finished_file)
 			crispresso_information[amplicon_name]['crispresso_command'] = crispresso_cmd
