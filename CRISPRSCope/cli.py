@@ -1,10 +1,13 @@
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 import multiprocessing as mp
 import gzip
+import hashlib
 import os
 import re
+import shutil
 import sys
 import signal
 import threading
@@ -30,11 +33,15 @@ from adjustText import adjust_text
 import random
 import dnaio
 from CRISPRSCope import __version__
+from CRISPRSCope.io_utils import open_text_maybe_gzip
 
 # Constants and default settings
 MIN_TOTAL_READS_PER_BARCODE_DEFAULT = 10
 MIN_READS_PER_AMPLICON_PER_CELL_DEFAULT = 0
 PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT = 30.0
+AMPLICON_SCORE_MIN_READS_PER_AMPLICON_DEFAULT = 5
+AMPLICON_SCORE_MIN_COVERED_FRACTION_DEFAULT = 2.0 / 3.0
+AMPLICON_SCORE_MAX_BARCODE_RANK_DEFAULT = 10_000
 H5AD_ZYGOSITY_DEFAULTS = {
 	"wt_max_mod_pct": 20.0,
 	"het_max_mod_pct": 80.0,
@@ -47,6 +54,23 @@ CELL_QUALITY_CODES = {
 	"LQ_HI": {"label": "LowScore_HighDepth",  "display": "Low score / High depth",  "color": "#ff7f0e"},
 	"LQ_LO": {"label": "LowScore_LowDepth",   "display": "Low score / Low depth",   "color": "#d62728"},
 }
+
+
+@dataclass(frozen=True)
+class AmpliconScoreConfig:
+	"""Settings for supported-breadth barcode classification."""
+
+	min_reads_per_amplicon: int = AMPLICON_SCORE_MIN_READS_PER_AMPLICON_DEFAULT
+	min_covered_fraction: float = AMPLICON_SCORE_MIN_COVERED_FRACTION_DEFAULT
+	max_barcode_rank: int = AMPLICON_SCORE_MAX_BARCODE_RANK_DEFAULT
+
+	def __post_init__(self):
+		if self.min_reads_per_amplicon < 1:
+			raise ValueError("amplicon_score_min_reads_per_amplicon must be >= 1")
+		if not np.isfinite(self.min_covered_fraction) or not 0 < self.min_covered_fraction <= 1:
+			raise ValueError("amplicon_score_min_covered_fraction must be > 0 and <= 1")
+		if self.max_barcode_rank < 1:
+			raise ValueError("amplicon_score_max_barcode_rank must be >= 1")
 
 
 def _numeric_tot_count_columns(df):
@@ -124,6 +148,35 @@ def _parse_float_setting(settings, key, default, minimum=None):
 	if minimum is not None and value < minimum:
 		raise ValueError(f"{key} must be >= {minimum}")
 	return value
+
+
+def _parse_amplicon_score_config(settings_file):
+	"""Parse and validate supported-breadth amplicon-score settings."""
+	settings = _parse_settings_file(settings_file)
+	min_reads_per_amplicon = _parse_int_setting(
+		settings,
+		'amplicon_score_min_reads_per_amplicon',
+		AMPLICON_SCORE_MIN_READS_PER_AMPLICON_DEFAULT,
+		minimum=1,
+	)
+	min_covered_fraction = _parse_float_setting(
+		settings,
+		'amplicon_score_min_covered_fraction',
+		AMPLICON_SCORE_MIN_COVERED_FRACTION_DEFAULT,
+	)
+	if not np.isfinite(min_covered_fraction) or not 0 < min_covered_fraction <= 1:
+		raise ValueError("amplicon_score_min_covered_fraction must be > 0 and <= 1")
+	max_barcode_rank = _parse_int_setting(
+		settings,
+		'amplicon_score_max_barcode_rank',
+		AMPLICON_SCORE_MAX_BARCODE_RANK_DEFAULT,
+		minimum=1,
+	)
+	return AmpliconScoreConfig(
+		min_reads_per_amplicon=min_reads_per_amplicon,
+		min_covered_fraction=min_covered_fraction,
+		max_barcode_rank=max_barcode_rank,
+	)
 
 
 def _parse_editing_rate_ci_config(settings_file):
@@ -647,6 +700,20 @@ def validate_output_root(output_root: str) -> str:
 
 
 
+def _require_selected_barcodes(parsed_information, cell_quality_to_analyze):
+	"""Fail early when configured quality groups contain no barcodes."""
+	selected_barcode_count = int(
+		parsed_information['Color'].isin(cell_quality_to_analyze).sum()
+	)
+	if selected_barcode_count == 0:
+		raise ValueError(
+			"No barcodes match the configured analysis groups "
+			f"{cell_quality_to_analyze}. Lower the supported-breadth or barcode-rank "
+			"thresholds, or select additional cell-quality groups."
+		)
+	return selected_barcode_count
+
+
 def main():
 	"""
 	Top-level pipeline entry point for the CRISPRSCope processing workflow.
@@ -684,6 +751,7 @@ def main():
 		debug_rejected_rescue_reads_bam, debug_require_strict_amplicon_alignment,
 		partial_rescue_min_mean_read_quality, settings_file
 		) = parse_settings(sys.argv)
+	amplicon_score_config = _parse_amplicon_score_config(settings_file)
 	editing_rate_ci_config = _parse_editing_rate_ci_config(settings_file)
 	editing_rate_depth_stability_config = _parse_editing_rate_depth_stability_config(settings_file)
 	end_settings = time.time() - start_settings
@@ -711,13 +779,15 @@ def main():
 
 	start_parse_crispresso = time.time()
 	parsed_information = parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_file,
-												  crispresso_information,output_root, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell,
-												  n_processes=n_processes,
-												  ignore_substitutions=ignore_substitutions)
+											  crispresso_information,output_root, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell,
+											  n_processes=n_processes,
+											  ignore_substitutions=ignore_substitutions,
+											  amplicon_score_config=amplicon_score_config)
 	end_parse_crispresso = time.time() - start_parse_crispresso
 	logging.info(f"Parse CRISPResso Outputs: {end_parse_crispresso}")
 
 	start_filter_amplicon = time.time()
+	_require_selected_barcodes(parsed_information, cell_quality_to_analyze)
 	filter_amplicon_reads(output_root, parsed_information, amplicon_names, cell_quality_to_analyze, n_processes)
 	end_filter_amplicon = time.time() - start_filter_amplicon
 	logging.info(f"Filter Amplicon Reads: {end_filter_amplicon}")
@@ -785,7 +855,7 @@ def main():
 		filtered_summary_plot_objects.append(filtered_mod_pct_plot_obj)
 
 	#
-	amp_score_plot_obj = plot_amp_score(output_root)
+	amp_score_plot_obj = plot_amp_score(output_root, config=amplicon_score_config)
 	if amp_score_plot_obj is not None:
 		filtered_summary_plot_objects.append(amp_score_plot_obj)
 
@@ -1457,7 +1527,7 @@ def _filter_to_hq_reads_at_single_amplicon(args):
 	Parameters
 	----------
 	args : tuple
-		(amp, amplicon_dir, barcodes)
+		(amp, amplicon_dir, barcodes, regenerate)
 
 	Returns
 	-------
@@ -1478,7 +1548,7 @@ def _filter_to_hq_reads_at_single_amplicon(args):
 			}
 	"""    
 
-	amp, amplicon_dir, barcodes = args
+	amp, amplicon_dir, barcodes, regenerate = args
 	#out1_name = os.path.join(amplicon_dir, f"filtered.{amp}.r1.fq.gz")
 	#out2_name = os.path.join(amplicon_dir, f"filtered.{amp}.r2.fq.gz")
 	out1_name = build_stage_filename(
@@ -1497,18 +1567,18 @@ def _filter_to_hq_reads_at_single_amplicon(args):
 		ext = "fq.gz",
 		output_root = amplicon_dir
 	)
-	
-
-	# Skip if already exists
-	if os.path.isfile(out1_name) and os.path.isfile(out2_name):
+	if not regenerate and os.path.isfile(out1_name) and os.path.isfile(out2_name):
 		return {
-			"Amplicon" : amp,
-			"Status" : "Success",
-			"R1" : out1_name,
-			"R2" : out2_name,
-			"Reason" : "AlreadyExists"
+			"Amplicon": amp,
+			"Status": "Success",
+			"R1": out1_name,
+			"R2": out2_name,
+			"Reason": "MatchingBarcodeCache",
 		}
-		
+	safe_remove(out1_name, silent=True)
+	safe_remove(out2_name, silent=True)
+
+
 	#in_r1 = os.path.join(amplicon_dir, f"{amp}.r1.fq.gz")
 	#in_r2 = os.path.join(amplicon_dir, f"{amp}.r2.fq.gz")
 	
@@ -1587,7 +1657,7 @@ def _filter_to_hq_alleles_at_single_amplicon(args):
 	Parameters
 	----------
 	args : tuple
-		A 3-tuple ``(amp, amplicon_dir, barcodes)``:
+		A 4-tuple ``(amp, amplicon_dir, barcodes, regenerate)``:
 		- amp : str
 			Amplicon name (used to build filenames).
 		- amplicon_dir : str
@@ -1608,7 +1678,7 @@ def _filter_to_hq_alleles_at_single_amplicon(args):
 		- 'Exception': optional long exception string (traceback) on unexpected errors
 	"""
 	# Writes out alleles for each high quality barcode at an amplicon
-	amp_dict, amplicon_dir, barcodes = args
+	amp_dict, amplicon_dir, barcodes, regenerate = args
 	amp = amp_dict['Amplicon']
    
 	amplicon_out_file = build_stage_filename(
@@ -1626,17 +1696,17 @@ def _filter_to_hq_alleles_at_single_amplicon(args):
 		ext = "fq",
 		output_root = amplicon_dir
 	)
-	
-	
-	# If outfile already exists, return success immediately
-	if os.path.isfile(amplicon_out_file):
-		return{
-			"Amplicon" : amp,
-			"Status" : "Success",
-			"In" : amplicon_in_file,
-			"Out" : amplicon_out_file,
-			"Reason" : "AlreadyExists"
+	if not regenerate and os.path.isfile(amplicon_out_file):
+		return {
+			"Amplicon": amp,
+			"Status": "Success",
+			"In": amplicon_in_file,
+			"Out": amplicon_out_file,
+			"Reason": "MatchingBarcodeCache",
 		}
+	safe_remove(amplicon_out_file, silent=True)
+	
+	
 	# If input file does not exists, return a warning
 	if not os.path.isfile(amplicon_in_file):
 		logging.warning("Amplicon %s: allele input file missing: %s", amp, amplicon_in_file)
@@ -1698,6 +1768,15 @@ def _filter_to_hq_alleles_at_single_amplicon(args):
    
 	
    
+def _barcode_set_sha256(barcodes):
+	"""Return a deterministic digest for a selected barcode set."""
+	digest = hashlib.sha256()
+	for barcode in sorted(str(barcode) for barcode in barcodes):
+		digest.update(barcode.encode('utf-8'))
+		digest.update(b'\n')
+	return digest.hexdigest()
+
+
 def filter_amplicon_reads(output_root, parsed_information, amplicon_names,
 						  cell_quality_to_analyze, n_processes):
 	"""
@@ -1742,10 +1821,19 @@ def filter_amplicon_reads(output_root, parsed_information, amplicon_names,
 	amplicon_dir = output_root + ".seq_by_amplicon/"
 	barcodes = parsed_information.loc[parsed_information['Color'].isin(cell_quality_to_analyze)].index.tolist()
 	barcodes = set(barcodes)
+	barcode_cache_file = output_root + ".filtered_barcodes.sha256"
+	barcode_hash = _barcode_set_sha256(barcodes)
+	cached_barcode_hash = None
+	if os.path.isfile(barcode_cache_file):
+		with open(barcode_cache_file, 'r') as handle:
+			cached_barcode_hash = handle.read().strip()
+	regenerate = cached_barcode_hash != barcode_hash
 
 	logging.info("Filtering for reads from %d high quality barcodes...", len(barcodes))
+	if regenerate:
+		logging.info("Selected barcode set changed; regenerating filtered FASTQs")
 	
-	worker_args = [(amp, amplicon_dir, barcodes) for amp in amplicon_names]
+	worker_args = [(amp, amplicon_dir, barcodes, regenerate) for amp in amplicon_names]
 	
 	# Filtering to reads from high quality barcodes at each amplicon
 	with mp.Pool(n_processes) as pool:
@@ -1765,6 +1853,7 @@ def filter_amplicon_reads(output_root, parsed_information, amplicon_names,
 	successful_amplicons = [r.get('Amplicon') for r in amp_success if r.get('Status') == 'Success']
 
 	if not successful_amplicons: # No amplicons filtered read amplicon files were created
+		safe_remove(barcode_cache_file, silent=True)
 		failures_file = os.path.join(output_root + ".read_filter_failure.txt")
 		try:
 			with open(failures_file, "w") as fh:
@@ -1782,10 +1871,24 @@ def filter_amplicon_reads(output_root, parsed_information, amplicon_names,
 	   
 	logging.info("Filtering to the alleles of high quality barcodes across %d amplicons. Skipping %d failed amplicons", len(amp_success), len(amp_failure))
 	
-	allele_worker_args = [(amp, amplicon_dir, barcodes) for amp in amp_success]
+	allele_worker_args = [(amp, amplicon_dir, barcodes, regenerate) for amp in amp_success]
 	
 	with mp.Pool(n_processes) as pool:
 		allele_results = pool.map(_filter_to_hq_alleles_at_single_amplicon, allele_worker_args)
+
+	allele_failures = [r for r in allele_results if r.get('Status') != 'Success']
+	if amp_failure or allele_failures:
+		safe_remove(barcode_cache_file, silent=True)
+	else:
+		with open(barcode_cache_file, 'w') as handle:
+			handle.write(barcode_hash + "\n")
+
+	return {
+		'read_filter_successes': amp_success,
+		'read_filter_failures': amp_failure,
+		'allele_filter_successes': [r for r in allele_results if r.get('Status') == 'Success'],
+		'allele_filter_failures': allele_failures,
+	}
 	
 
 def parse_settings(args):
@@ -2109,16 +2212,19 @@ def write_editing_rate_ci_output(
 	"""Write editing-rate outputs and return plots plus significant amplicons."""
 	from CRISPRSCope.editing_rate_ci import (
 		_significant_plot_rows,
-		compute_editing_rate_confidence_intervals,
+		compute_editing_rate_resampling_analyses,
 		write_editing_rate_ci_plots,
+		write_editing_rate_unconditional_permutation_plot,
 	)
 
 	editing_summary_path = output_root + ".editingSummary.txt"
 	quality_scores_path = output_root + ".amplicon_score.txt"
 	output_path = output_root + ".editingRateConfidenceIntervals.txt"
+	permutation_output_path = output_root + ".editingRateUnconditionalPermutation.txt"
+	permutation_simulations_output_path = output_root + ".editingRateUnconditionalPermutationSimulations.txt"
 	editing_summary = pd.read_csv(editing_summary_path, sep="\t", index_col=0)
 	quality_scores = pd.read_csv(quality_scores_path, sep="\t", index_col=0)
-	results = compute_editing_rate_confidence_intervals(
+	results, permutation_results, permutation_simulations = compute_editing_rate_resampling_analyses(
 		editing_summary=editing_summary,
 		quality_scores=quality_scores,
 		high_quality_codes=cell_quality_to_analyze,
@@ -2128,14 +2234,47 @@ def write_editing_rate_ci_output(
 	)
 	results.to_csv(output_path, sep="\t", index=False, na_rep="NA", float_format="%.6f")
 	logging.info("Wrote editing-rate confidence interval table to %s", output_path)
+	permutation_results.to_csv(
+		permutation_output_path,
+		sep="\t",
+		index=False,
+		na_rep="NA",
+		float_format="%.6f",
+	)
+	permutation_simulations.to_csv(
+		permutation_simulations_output_path,
+		sep="\t",
+		index=False,
+		na_rep="NA",
+		float_format="%.6f",
+	)
+	logging.info("Wrote unconditional permutation summary to %s", permutation_output_path)
+	logging.info(
+		"Wrote unconditional permutation simulations to %s",
+		permutation_simulations_output_path,
+	)
 
 	plot_metadata = write_editing_rate_ci_plots(results, output_root)
+	plot_metadata.extend(
+		write_editing_rate_unconditional_permutation_plot(
+			permutation_results,
+			permutation_simulations,
+			output_root,
+		)
+	)
 	plot_objects = [
 		PlotObject(
 			plot_name=metadata["plot_name"],
 			plot_title=metadata["plot_title"],
 			plot_label=metadata["plot_label"],
-			plot_datas=[("Editing-rate confidence intervals", output_path)],
+			plot_datas=(
+				[
+					("Unconditional permutation summary", permutation_output_path),
+					("Unconditional permutation simulations", permutation_simulations_output_path),
+				]
+				if metadata["plot_name"].endswith(".16_EditingRateUnconditionalPermutation")
+				else [("Editing-rate confidence intervals", output_path)]
+			),
 		)
 		for metadata in plot_metadata
 	]
@@ -2154,12 +2293,15 @@ def write_editing_rate_depth_stability_output(
 	"""Compute, write, and plot first-pass editing-rate depth stability."""
 	from CRISPRSCope.editing_rate_ci import (
 		compute_editing_rate_depth_stability,
+		compute_editing_rate_fixed_cell_depth_stability,
 		write_editing_rate_depth_stability_plot,
+		write_editing_rate_fixed_cell_depth_stability_plot,
 	)
 
 	editing_summary_path = output_root + ".editingSummary.txt"
 	quality_scores_path = output_root + ".amplicon_score.txt"
 	output_path = output_root + ".editingRateDepthStability.txt"
+	fixed_output_path = output_root + ".editingRateFixedCellDepthStability.txt"
 	editing_summary = pd.read_csv(editing_summary_path, sep="\t", index_col=0)
 	quality_scores = pd.read_csv(quality_scores_path, sep="\t", index_col=0)
 	results = compute_editing_rate_depth_stability(
@@ -2173,12 +2315,36 @@ def write_editing_rate_depth_stability_output(
 	results.to_csv(output_path, sep="\t", index=False, na_rep="NA", float_format="%.6f")
 	logging.info("Wrote editing-rate depth stability table to %s", output_path)
 
+	fixed_results = compute_editing_rate_fixed_cell_depth_stability(
+		editing_summary=editing_summary,
+		quality_scores=quality_scores,
+		high_quality_codes=cell_quality_to_analyze,
+		min_reads_per_amplicon_per_cell=min_reads_per_amplicon_per_cell,
+		config=config,
+		n_processes=n_processes,
+	)
+	fixed_results.to_csv(
+		fixed_output_path,
+		sep="\t",
+		index=False,
+		na_rep="NA",
+		float_format="%.6f",
+	)
+	logging.info(
+		"Wrote fixed-cell-count editing-rate stability table to %s",
+		fixed_output_path,
+	)
+
 	plot_metadata = write_editing_rate_depth_stability_plot(
 		results,
 		output_root,
 		significant_amplicons=significant_amplicons,
 	)
-	return [
+	fixed_plot_metadata = write_editing_rate_fixed_cell_depth_stability_plot(
+		fixed_results,
+		output_root,
+	)
+	plot_objects = [
 		PlotObject(
 			plot_name=metadata["plot_name"],
 			plot_title=metadata["plot_title"],
@@ -2187,6 +2353,16 @@ def write_editing_rate_depth_stability_output(
 		)
 		for metadata in plot_metadata
 	]
+	plot_objects.extend(
+		PlotObject(
+			plot_name=metadata["plot_name"],
+			plot_title=metadata["plot_title"],
+			plot_label=metadata["plot_label"],
+			plot_datas=[("Fixed-cell-count editing-rate stability", fixed_output_path)],
+		)
+		for metadata in fixed_plot_metadata
+	)
+	return plot_objects
 
 
 def write_h5ad_output(output_root, settings_file, h5ad_output=None, h5ad_export_config=None, n_processes=None):
@@ -3757,6 +3933,25 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 
 	return amplicon_names,amplicon_information,info_file
 
+def _decompressed_fastq_sha256(path):
+	"""Return a stable SHA-256 digest of decompressed FASTQ content."""
+	digest = hashlib.sha256()
+	with gzip.open(path, 'rb') as handle:
+		for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+			digest.update(chunk)
+	return digest.hexdigest()
+
+
+def _filtered_allele_fastq_path(output_root, amplicon_name):
+	return build_stage_filename(
+		stage=STAGE_FILTER,
+		tag="alleles_qc_cells",
+		amplicon=amplicon_name,
+		ext="fq.gz",
+		output_root=output_root + ".seq_by_amplicon",
+	)
+
+
 def run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles):
 	"""
 	Generate and execute CRISPResso2 commands for each amplicon.
@@ -3818,23 +4013,37 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 		info_file = output_root+".crispresso.info.txt"
 	
 	
+	cached_information = {}
+	current_allele_input_hashes = {}
+	if alleles:
+		for amplicon_name in amplicon_names:
+			allele_input = _filtered_allele_fastq_path(output_root, amplicon_name)
+			if allele_input and os.path.isfile(allele_input):
+				current_allele_input_hashes[amplicon_name] = _decompressed_fastq_sha256(allele_input)
+
 	if os.path.isfile(info_file):
 		with open(info_file,'r') as fin:
 			head = fin.readline().strip()
 			head_els = head.split("\t")
-			crispresso_information = {}
 			for line in fin:
 				line_els = line.strip().split("\t")
 				amp_info = dict(zip(head_els,line_els))
-				crispresso_information[line_els[0]] = amp_info
+				cached_information[line_els[0]] = amp_info
 
 		cache_is_valid = True
-		for amplicon_name, amp_info in crispresso_information.items():
+		for amplicon_name in amplicon_names:
+			amp_info = cached_information.get(amplicon_name)
+			if amp_info is None:
+				cache_is_valid = False
+				break
 			if amp_info.get('status') == 'Failed':
 				cache_is_valid = False
 				logging.warning("Ignoring stale CRISPResso info cache because %s previously failed", amplicon_name)
 				break
 			if amp_info.get('status') != 'Completed':
+				if alleles and current_allele_input_hashes.get(amplicon_name):
+					cache_is_valid = False
+					break
 				continue
 			finished_file = amp_info.get('finished_file')
 			crispresso_run_folder = amp_info.get('crispresso_run_folder')
@@ -3843,10 +4052,19 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 				cache_is_valid = False
 				logging.warning("Ignoring stale CRISPResso info cache because %s is missing completion outputs", amplicon_name)
 				break
+			if alleles:
+				current_hash = current_allele_input_hashes.get(amplicon_name)
+				if not current_hash or amp_info.get('input_sha256') != current_hash:
+					cache_is_valid = False
+					logging.info(
+						"Invalidating filtered CRISPResso cache for %s because its allele input changed",
+						amplicon_name,
+					)
+					break
 		if cache_is_valid:
 			logging.info ("Finished running CRISPResso on targets")
-			return crispresso_information
-		os.remove(info_file)
+			return cached_information
+		safe_remove(info_file, silent=True)
 
 	crispresso_commands = []
 	crispresso_information = {}
@@ -3860,6 +4078,9 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 	for amplicon_name in amplicon_names:
 		crispresso_information[amplicon_name] = {}
 		crispresso_information[amplicon_name]['name'] = amplicon_name
+		crispresso_information[amplicon_name]['input_sha256'] = (
+			current_allele_input_hashes.get(amplicon_name, '') if alleles else ''
+		)
 		if amplicon_information[amplicon_name]['aln_count'] == '0':
 			#print(f"Got to 2559: {amplicon_name} within skipped block")
 			crispresso_information[amplicon_name]['status'] = 'Skipped'
@@ -3889,15 +4110,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 			# Separate crispresso_cmd for alleles and non alleles
 			if alleles:
 				# set pass allele_seq file through crispresso
-				allele_dir = os.path.join(output_root + ".seq_by_amplicon")
-				#amp_filename = os.path.join(allele_dir, amplicon_name + "_filtered_allele.fq.gz")
-				amp_filename = build_stage_filename(
-					stage = STAGE_FILTER,
-					tag = "alleles_qc_cells",
-					amplicon = amplicon_name,
-					ext = "fq.gz",
-					output_root = allele_dir
-				)
+				amp_filename = _filtered_allele_fastq_path(output_root, amplicon_name)
 				#print(f"Got to line 2609\n{amp_filename}")
 
 				if not amp_filename or not os.path.isfile(amp_filename):
@@ -3967,6 +4180,17 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 			crispresso_information[amplicon_name]['crispresso_run_folder'] = crispresso_run_folder
 			
 			crispresso_info_file = os.path.join(crispresso_run_folder, 'CRISPResso2_info.json')
+			if alleles and (os.path.isfile(finished_file) or os.path.isdir(crispresso_run_folder)):
+				cached_hash = cached_information.get(amplicon_name, {}).get('input_sha256')
+				current_hash = current_allele_input_hashes.get(amplicon_name)
+				if not current_hash or cached_hash != current_hash:
+					logging.info(
+						"Removing stale filtered CRISPResso outputs for %s",
+						amplicon_name,
+					)
+					safe_remove(finished_file, silent=True)
+					if os.path.isdir(crispresso_run_folder):
+						shutil.rmtree(crispresso_run_folder)
 			if os.path.isfile(finished_file) and os.path.isfile(crispresso_info_file):
 				finished_count += 1
 				continue
@@ -3979,6 +4203,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					'log_file': log_file,
 					'finished_file': finished_file,
 					'crispresso_run_folder': crispresso_run_folder,
+					'input_sha256': crispresso_information[amplicon_name]['input_sha256'],
 				})
 
 
@@ -4028,6 +4253,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 	with open(info_file,'w') as fout:
 		header_els = [
 					'name',
+					'input_sha256',
 					'crispresso_command',
 					'crispresso_run_folder',
 					'finished_file',
@@ -4225,7 +4451,7 @@ def parse_one_crispresso_output(this_args):
 	num_crispresso_references = 0
 	num_references = len(input_ref_allele_counts.split(","))
 	logging.debug('Parsing CRISPResso output for ' + amplicon_name)
-	fastq_input_handle =  gzip.open(crispresso_output_fastq,'rt')
+	fastq_input_handle = open_text_maybe_gzip(crispresso_output_fastq, 'rt')
 	next_fastq_id = fastq_input_handle.readline()
 	while(next_fastq_id):
 		#read through fastq in sets of 4
@@ -4680,7 +4906,8 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 							output_root, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, n_processes,num_max_alleles=2,num_references=1,
 							min_num_reads_per_cell=5,min_allele_pct_cutoff=.1,min_allele_count_cutoff=2,
 							ignore_substitutions=False,
-							write_alleles=False):
+							write_alleles=False,
+							amplicon_score_config=None):
 	"""
 	Generate and execute CRISPResso2 commands for each amplicon.
 
@@ -4878,16 +5105,19 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 	usable_tot_cols = ["totCount.%s" % name for name in usable_amplicon_names]
 	totCols = summary_df[usable_tot_cols].apply(pd.to_numeric, errors = 'coerce') if usable_tot_cols else pd.DataFrame(index = summary_df.index)
 	
-	# Check if Amplicon Score File Exists
+	# Always regenerate so scoring-code or setting changes cannot leave stale
+	# classifications in downstream filtered outputs.
 	amp_score_file = output_root + ".amplicon_score.txt"
-	if os.path.isfile(amp_score_file): # if amp_score_file exists, read it in
-		amp_score = pd.read_csv(amp_score_file, sep = "\t", index_col = 0)
-	else: # Generate Amplicon Score and write it to a file
-		amplicon_score_time = time.time()
-		amp_score = generate_amplicon_score(totCols, min_reads_per_amplicon_per_cell = min_reads_per_amplicon_per_cell, min_total_reads_per_barcode = min_total_reads_per_barcode)
-		amp_score.to_csv(amp_score_file, sep = "\t")
-		end_amplicon_score_time = time.time() - amplicon_score_time
-		logging.info("Generated amplicon score in %.2f seconds"%(end_amplicon_score_time))
+	amplicon_score_time = time.time()
+	amp_score = generate_amplicon_score(
+		totCols,
+		min_reads_per_amplicon_per_cell=min_reads_per_amplicon_per_cell,
+		min_total_reads_per_barcode=min_total_reads_per_barcode,
+		config=amplicon_score_config,
+	)
+	amp_score.to_csv(amp_score_file, sep = "\t")
+	end_amplicon_score_time = time.time() - amplicon_score_time
+	logging.info("Generated supported-breadth amplicon score in %.2f seconds", end_amplicon_score_time)
 
 	with open(output_root+".filteredEditingSummaryPseudobulk.txt",'w') as fout:
 		header = "cell"
@@ -4972,7 +5202,7 @@ def _parse_filtered_crispresso_allele_output(crispresso_output_fastq, read_suppo
 	if not crispresso_output_fastq or not os.path.isfile(crispresso_output_fastq):
 		return results
 
-	with gzip.open(crispresso_output_fastq, "rt") as fin:
+	with open_text_maybe_gzip(crispresso_output_fastq, "rt") as fin:
 		while True:
 			header = fin.readline()
 			if not header:
@@ -5088,7 +5318,7 @@ def write_filtered_editing_summary_from_filtered_crispresso(
 	return add_color_information(filtered_summary, amp_score)
 
 
-def stratify_data(input_data):
+def stratify_data(input_data, config=None):
 	"""
 	Assign quality category codes to barcodes.
 
@@ -5098,9 +5328,8 @@ def stratify_data(input_data):
 		- 'LQ_HI'
 		- 'LQ_LO'
 
-	Classification is based on:
-		- Amplicon Score cutoff (>= 1)
-		- Barcode Rank cutoff (<= 10000)
+	Classification is based on the configured supported-breadth fraction and
+	barcode-rank cutoff.
 
 	Parameters
 	----------
@@ -5114,48 +5343,40 @@ def stratify_data(input_data):
 	pandas.DataFrame
 		Same DataFrame with an added 'Color' column.
 
-	Notes
-	-----
-	- Cutoffs are currently hard-coded.
-	- Does not modify other columns.
+	The input must contain ``Supported Amplicons``, ``Usable Amplicons``, and
+	``Barcode Rank``. The returned frame is a copy.
 	"""
-	#amp_score_cutoff = 1
-	depth_cutoff = 10000
+	if config is None:
+		config = AmpliconScoreConfig()
+	required_columns = {'Supported Amplicons', 'Usable Amplicons', 'Barcode Rank'}
+	missing_columns = sorted(required_columns - set(input_data.columns))
+	if missing_columns:
+		raise ValueError(f"Missing amplicon-score columns: {missing_columns}")
 
-	
-	top_cells = input_data[input_data['Barcode Rank'] <= depth_cutoff]
-	amp_score_cutoff = top_cells['Amplicon Score'].median()
+	result = input_data.copy()
+	required_supported = np.ceil(
+		config.min_covered_fraction * result['Usable Amplicons'].astype(float)
+	).astype(int)
+	high_score = result['Supported Amplicons'].astype(int) >= required_supported
+	high_depth = result['Barcode Rank'].astype(int) <= config.max_barcode_rank
 
-	codes = []
+	result['Color'] = 'LQ_LO'
+	result.loc[high_score & high_depth, 'Color'] = 'HQ_HI'
+	result.loc[high_score & ~high_depth, 'Color'] = 'HQ_LO'
+	result.loc[~high_score & high_depth, 'Color'] = 'LQ_HI'
+	return result
 
-	for i in range(len(input_data)):
-		barcode_rank = input_data['Barcode Rank'].iloc[i]
-		amp_score = input_data['Amplicon Score'].iloc[i]
-
-		if barcode_rank <= depth_cutoff:
-			if amp_score >= amp_score_cutoff:
-				code = "HQ_HI"
-			else:
-				code = "LQ_HI"
-		else:
-			if amp_score >= amp_score_cutoff:
-				code = "HQ_LO"
-			else:
-				code = "LQ_LO"
-
-		codes.append(code)
-
-	input_data['Color'] = codes
-	return input_data 
-
-def generate_amplicon_score(raw_tot_columns, min_reads_per_amplicon_per_cell, min_total_reads_per_barcode):
+def generate_amplicon_score(
+	raw_tot_columns,
+	min_reads_per_amplicon_per_cell,
+	min_total_reads_per_barcode,
+	config=None,
+):
 	"""
-	Compute amplicon score and assign quality categories to barcodes.
+	Compute supported-breadth scores and assign quality categories to barcodes.
 
-	Amplicon score is computed by:
-		- Evaluating percentile thresholds across amplicons.
-		- Weighting contributions using predefined constants.
-		- Summing across percentile tiers.
+	Each usable amplicon contributes at most one unit of support. The score is
+	the fraction of usable amplicons with at least the configured read count.
 
 	Parameters
 	----------
@@ -5175,15 +5396,19 @@ def generate_amplicon_score(raw_tot_columns, min_reads_per_amplicon_per_cell, mi
 			- 'Barcode Rank'
 			- 'Color' (quality category)
 
-	Notes
-	-----
-	- Applies per-amplicon coverage filtering first.
-	- Applies total-read filtering last.
-	- Calls `stratify_data` to assign quality categories.
+	The existing all-amplicon minimum is applied before scoring, and the total
+	read-count filter is applied after deterministic ranking.
 	"""
-	percentile_cutoffs = [0.975, 0.99, 0.999, 0.9999]
-	constant_values = [1, 10, 50, 100]
-	output_columns = ['Amplicon Score', 'Read Count', 'Barcode Rank', 'Color']
+	if config is None:
+		config = AmpliconScoreConfig()
+	output_columns = [
+		'Amplicon Score',
+		'Supported Amplicons',
+		'Usable Amplicons',
+		'Read Count',
+		'Barcode Rank',
+		'Color',
+	]
 
 	if raw_tot_columns.empty or raw_tot_columns.shape[1] == 0:
 		return pd.DataFrame(columns = output_columns)
@@ -5197,9 +5422,8 @@ def generate_amplicon_score(raw_tot_columns, min_reads_per_amplicon_per_cell, mi
 	if raw_tot_columns.empty or raw_tot_columns.shape[1] == 0:
 		return pd.DataFrame(columns = output_columns)
 	
-	# Filter to cells with 'min_reads_per_amplicon_per_cell' or more reads for all amplicons
+	# Preserve the existing optional gate across every usable amplicon.
 	mask = (raw_tot_columns >= min_reads_per_amplicon_per_cell).all(axis = 1)
-	#passing_barcodes = raw_tot_columns.index[mask]
 	raw_tot_columns = raw_tot_columns.loc[mask]
 
 	logging.info('Cells that did not pass the read count per amplicon cutoff:' + str(len(mask) - sum(mask)))
@@ -5207,29 +5431,26 @@ def generate_amplicon_score(raw_tot_columns, min_reads_per_amplicon_per_cell, mi
 	if raw_tot_columns.empty:
 		return pd.DataFrame(columns = output_columns)
 	
-	amplicon_scores = pd.Series(0, index = raw_tot_columns.index, dtype = float)
-	for percentile, constant_val in zip(percentile_cutoffs, constant_values):
-		percentile_vals = raw_tot_columns.quantile(percentile, axis = 0)
-		stat = (
-			raw_tot_columns.ge(percentile_vals, axis = 1).sum(axis = 1)
-			/ len(percentile_vals)
-		) * constant_val
-		amplicon_scores += stat
-	
+	usable_amplicon_count = raw_tot_columns.shape[1]
+	supported_amplicons = raw_tot_columns.ge(config.min_reads_per_amplicon).sum(axis=1)
 	amplicon_df = pd.DataFrame({
-		'Amplicon Score': amplicon_scores,
+		'Amplicon Score': supported_amplicons / float(usable_amplicon_count),
+		'Supported Amplicons': supported_amplicons.astype(int),
+		'Usable Amplicons': usable_amplicon_count,
 		'Read Count': raw_tot_columns.sum(axis = 1),
 	})
-	amplicon_df = amplicon_df.sort_values("Read Count", ascending = False)
+	amplicon_df['_Barcode Sort'] = amplicon_df.index.astype(str)
+	amplicon_df = amplicon_df.sort_values(
+		['Read Count', '_Barcode Sort'],
+		ascending=[False, True],
+		kind='stable',
+	).drop(columns=['_Barcode Sort'])
 	amplicon_df['Barcode Rank'] = range(1, len(amplicon_df) + 1)
 	
-	amplicon_df = stratify_data(amplicon_df)
+	amplicon_df = stratify_data(amplicon_df, config=config)
 	
 	filtered_df = amplicon_df[amplicon_df['Read Count'] >= min_total_reads_per_barcode]
-	#filtered_df = filtered_df[filtered_df.index.isin(passing_barcod
-	
-	
-	return filtered_df
+	return filtered_df[output_columns]
 
 def add_color_information(editingSummary, color_df):
 	"""
@@ -5261,9 +5482,9 @@ def add_color_information(editingSummary, color_df):
 	new_df['Color'] = Color_col
 	return new_df
 
-def plot_amp_score(output_root):
+def plot_amp_score(output_root, config=None):
 	"""
-	Generate a scatter plot of Amplicon Score versus Barcode Rank.
+	Generate a scatter plot of supported amplicon breadth versus barcode rank.
 
 	Each barcode is plotted with:
 		- X-axis: Barcode Rank (descending by total read count)
@@ -5298,13 +5519,16 @@ def plot_amp_score(output_root):
 	-----
 	- Expected quality category short codes:
 		{'HQ_HI','HQ_LO','LQ_HI','LQ_LO'}.
-	- The amplicon score is computed in `generate_amplicon_score`.
+	- The amplicon score is the fraction of usable amplicons meeting the
+	  configured support threshold.
 	- Barcode Rank is assigned after sorting by total read count.
 	- Category counts are displayed directly on the plot.
 	- Does not modify input data.
 	"""
 	plt.clf()
 	plt.cla()
+	if config is None:
+		config = AmpliconScoreConfig()
 
 	_legacy_to_short = {
 	"High_score_High_depth": "HQ_HI",
@@ -5333,7 +5557,7 @@ def plot_amp_score(output_root):
 		  
 	summary_stats = pd.DataFrame({"Count": value_counts, "Color": colors, "Category": categories})
 	
-	amp_score_max = data['Amplicon Score'].max()
+	amp_score_max = max(float(data['Amplicon Score'].max()), 1.0)
    
 	color_array = []
 	for color_val in data['Color']:
@@ -5349,9 +5573,28 @@ def plot_amp_score(output_root):
 	plt.scatter(data['Barcode Rank'],
 				data['Amplicon Score'],
 				color = color_array)
+	plt.axhline(
+		config.min_covered_fraction,
+		color='black',
+		linestyle='--',
+		linewidth=1.5,
+		label='Supported-breadth threshold',
+	)
+	plt.axvline(
+		config.max_barcode_rank,
+		color='gray',
+		linestyle=':',
+		linewidth=1.5,
+		label='High-depth rank threshold',
+	)
 	plt.xlabel("Barcode Rank", fontsize = 22)
-	plt.ylabel("Amplicon Score", fontsize = 22)
-	plt.title("Amplicon Score", fontsize = 24)
+	plt.ylabel(
+		f"Supported Amplicon Fraction (≥{config.min_reads_per_amplicon} reads)",
+		fontsize = 22,
+	)
+	plt.title("Supported Amplicon Breadth", fontsize = 24)
+	plt.ylim(-0.02, 1.02)
+	plt.legend(loc='lower left', fontsize=12)
 	plt.yticks(fontsize = 16)
 	plt.xticks(fontsize = 16)
 	plt.tight_layout()
@@ -5368,8 +5611,12 @@ def plot_amp_score(output_root):
 	logging.info("Finished amplicon score plot")
 	summary_plot_obj = PlotObject(
 		plot_name = amp_plot_root,
-		plot_title = 'Amplicon Score Plot',
-		plot_label = "Plot of the Barcode Rank (X) vs. Amplicon Score (Y) with color coding according to Amplicon Score category.",
+		plot_title = 'Supported Amplicon Breadth Plot',
+		plot_label = (
+			"Barcode rank versus the fraction of usable amplicons meeting the "
+			"configured read-support threshold. Dashed lines show the configured "
+			"breadth and barcode-rank classification boundaries."
+		),
 		plot_datas = [
 			("Amplicon Score", output_root + ".amplicon_score.txt")
 		]

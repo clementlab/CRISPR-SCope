@@ -149,6 +149,9 @@ assign_reads_to_all_possible_amplicons	False
 suppress_sub_crispresso_plots	False
 min_total_reads_per_barcode	10
 min_reads_per_amplicon_per_cell	0
+amplicon_score_min_reads_per_amplicon	5
+amplicon_score_min_covered_fraction	0.6666666666666666
+amplicon_score_max_barcode_rank	10000
 include_high_score_high_depth	True
 include_high_score_low_depth	True
 include_low_score_high_depth	False
@@ -241,7 +244,10 @@ You may also use `genome` instead of `bowtie2_index`; internally the pipeline re
 | `suppress_sub_crispresso_plots` | `False` | Disables per-amplicon CRISPResso plot/report generation. |
 | `alt_alleles_file` | not used | Optional alternate allele definition file. |
 | `min_total_reads_per_barcode` | `10` | Minimum total reads required for a barcode to be considered downstream. |
-| `min_reads_per_amplicon_per_cell` | `0` | Minimum reads per amplicon per cell for scoring/filtering. |
+| `min_reads_per_amplicon_per_cell` | `0` | Optional stricter gate requiring this many reads at every usable amplicon before a barcode is scored; it also sets per-amplicon eligibility in editing-rate analyses. |
+| `amplicon_score_min_reads_per_amplicon` | `5` | Reads required for an amplicon to count as supported in the breadth score; must be at least 1. |
+| `amplicon_score_min_covered_fraction` | `0.6666666666666666` | Fraction of usable amplicons that must be supported for a high score; must be greater than 0 and no greater than 1. |
+| `amplicon_score_max_barcode_rank` | `10000` | Largest total-read barcode rank classified as high depth; must be at least 1. |
 | `write_editing_rate_ci` | `True` | Enables pointwise bootstrap confidence intervals for first-pass cell/allele editing rates; set to `False` to disable. |
 | `editing_rate_ci_bootstrap_iterations` | `10000` | Number of bootstrap resamples per amplicon; must be at least 100. |
 | `editing_rate_ci_permutation_iterations` | `10000` | Number of configured analysis-group label permutations used for each two-sided significance test; must be at least 100. |
@@ -260,6 +266,19 @@ You may also use `genome` instead of `bowtie2_index`; internally the pipeline re
 
 If none of these flags are provided, the pipeline defaults to including only `HQ_HI`.
 
+The amplicon score is the fraction of usable first-pass amplicons meeting
+`amplicon_score_min_reads_per_amplicon`. A barcode is high score when it has
+at least `ceil(amplicon_score_min_covered_fraction × usable amplicons)`
+supported amplicons. Reads beyond the support threshold at one amplicon do not
+increase its contribution, so isolated amplification jackpots cannot compensate
+for missing coverage elsewhere in the panel. High versus low depth remains a
+separate classification based on `amplicon_score_max_barcode_rank`.
+
+The `.amplicon_score.txt` table reports `Amplicon Score` on a 0–1 scale together
+with `Supported Amplicons`, `Usable Amplicons`, total read count, barcode rank,
+and the four-way quality classification. It is regenerated on every run so
+changed scoring settings cannot silently reuse stale classifications.
+
 | Key | Meaning |
 | --- | --- |
 | `include_high_score_high_depth` | Include high-score, high-depth cells (`HQ_HI`). |
@@ -273,14 +292,15 @@ By default, CRISPRSCope resamples cells with replacement and computes pointwise 
 
 The output reports estimates for each amplicon from:
 
-- all analyzable cells with an eligible first-pass call
-- cells in the quality categories enabled by the `include_*` settings
-- the configured-group-minus-all and configured-group-minus-remaining-cell differences
-- a coverage-controlled configured-group-minus-remaining-cell difference
+- **AllCells:** all analyzable cells with an eligible first-pass call
+- **InGroup:** eligible cells in the quality categories enabled by the `include_*` settings
+- **OutGroup:** every other eligible cell
+- the InGroup-minus-AllCells and InGroup-minus-OutGroup differences
+- a coverage-controlled InGroup-minus-OutGroup difference
 
-For each amplicon, CRISPRSCope first permutes the configured analysis-group labels among all eligible cells while preserving the observed group size. This unconditional two-sided test asks whether the selected group behaves differently from a random same-sized subset.
+For each amplicon, CRISPRSCope first permutes InGroup labels among AllCells without replacement while preserving the observed InGroup size. This unconditional two-sided test asks whether the InGroup behaves differently from a random same-sized subset. The exact permutation draws used for the p-value are also written to `.editingRateUnconditionalPermutationSimulations.txt`, summarized in `.editingRateUnconditionalPermutation.txt`, and shown in `.16_EditingRateUnconditionalPermutation.{png,pdf}` for every estimable amplicon.
 
-The coverage-controlled follow-up runs for every testable amplicon. Read counts through `editing_rate_ci_coverage_exact_max_reads` define exact strata; higher counts are grouped into consecutive bins of `editing_rate_ci_coverage_bin_width_reads`. Labels are permuted only within strata containing both configured-group and remaining cells. The adjusted effect is an information-weighted average of the within-stratum group-minus-remaining-cell differences. Cells in coverage strata containing only one group remain in the unconditional estimates but cannot contribute to the controlled effect; common-support counts and retained percentages are reported explicitly. A separate within-stratum bootstrap supplies the adjusted effect's confidence interval.
+The coverage-controlled follow-up runs for every testable amplicon. Read counts through `editing_rate_ci_coverage_exact_max_reads` define exact strata; higher counts are grouped into consecutive bins of `editing_rate_ci_coverage_bin_width_reads`. Labels are permuted only within strata containing both InGroup and OutGroup cells. The adjusted effect is an information-weighted average of the within-stratum InGroup-minus-OutGroup differences. Cells in single-cohort coverage strata remain in the unconditional estimates but cannot contribute to the controlled effect; common-support counts and retained percentages are reported explicitly. The table also reports common-depth standardized InGroup and OutGroup means using the same normalized overlap weights; their difference equals the coverage-adjusted effect. A separate within-stratum bootstrap supplies the adjusted effect's confidence interval.
 
 The unconditional and controlled permutation p-values receive separate Benjamini-Hochberg adjustments across all testable amplicons. Confidence-interval and editing-stability figures are filtered using the coverage-controlled adjusted p-value at or below 0.05, while the raw-versus-adjusted comparison figure and full output tables retain all estimable amplicons. If no amplicon passes the controlled threshold, the significance-filtered figures are omitted but the comparison figure is retained when possible.
 
@@ -297,6 +317,14 @@ The absolute plot reports percentage-point deviations for coverage-controlled si
 If no amplicons meet the configured-group threshold, CRISPRSCope omits the relative PNG/PDF cleanly while retaining the shared stability table and absolute plot.
 
 The stability bands answer how much the inferred editing rate changes as cells from this run are retained or removed. They are finite-cohort downsampling diagnostics, not confidence intervals across biological replicates.
+
+In addition to the percentage-based plots, CRISPRSCope automatically writes an
+exploratory fixed-cell-count absolute-stability table and plot whenever depth
+stability is enabled. It samples exactly 100, 200, 400, 800, and 1,000 eligible
+cells without replacement and reports each subsample's percentage-point
+deviation from its full eligible-cohort estimate. This fixed-count plot includes
+all amplicons regardless of editing-rate significance. Cohorts too small for a
+requested count are recorded as unavailable and are not capped or relabeled.
 
 ### h5ad Zygosity Parameters
 
@@ -323,12 +351,17 @@ results/demo_run.amplicon_score.txt
 results/demo_run.filteredEditingSummary.txt
 results/demo_run.filteredEditingSummaryPseudobulk.txt
 results/demo_run.editingRateConfidenceIntervals.txt
+results/demo_run.editingRateUnconditionalPermutation.txt
+results/demo_run.editingRateUnconditionalPermutationSimulations.txt
 results/demo_run.10_EditingRateConfidenceIntervals.{png,pdf}
 results/demo_run.11_EditingRateQualityDelta.{png,pdf}
 results/demo_run.editingRateDepthStability.txt
 results/demo_run.12_EditingRateDepthStability.{png,pdf}
 results/demo_run.13_EditingRateRelativeDepthStability.{png,pdf}
 results/demo_run.14_EditingRateCoverageAdjustedEffects.{png,pdf}
+results/demo_run.editingRateFixedCellDepthStability.txt
+results/demo_run.15_EditingRateFixedCellDepthStability.{png,pdf}
+results/demo_run.16_EditingRateUnconditionalPermutation.{png,pdf}
 results/demo_run.h5ad
 ```
 

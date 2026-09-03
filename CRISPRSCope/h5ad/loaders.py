@@ -2,7 +2,6 @@
 
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import gzip
 import logging
 import tempfile
 import traceback
@@ -13,16 +12,18 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from CRISPRSCope.io_utils import open_text_maybe_gzip
+
 logger = logging.getLogger(__name__)
 
 
 def _parse_and_write_parquet(input_fastq_path: Path, output_parquet_path: Path) -> Optional[str]:
-    """Parse a single CRISPResso_output.fastq.gz file and persist allele counts to Parquet."""
+    """Parse a single CRISPResso output FASTQ and persist allele counts to Parquet."""
     amplicon_name = input_fastq_path.parent.name.replace("CRISPResso_on_", "", 1)
     allele_counts = Counter()
 
     try:
-        with gzip.open(input_fastq_path, "rt") as handle:
+        with open_text_maybe_gzip(input_fastq_path, "rt") as handle:
             for header in handle:
                 sequence = next(handle).strip()
                 next(handle)

@@ -41,6 +41,11 @@ def test_parse_crispresso_outputs_preserves_failed_amplicons_as_na(tmp_path):
         },
     }
 
+    pd.DataFrame(
+        {"Amplicon Score": [999], "Color": ["HQ_HI"]},
+        index=["stale_cell"],
+    ).to_csv(f"{output_root}.amplicon_score.txt", sep="\t")
+
     summary_df = parse_crispresso_outputs(
         amplicon_names=amplicon_names,
         amplicon_information=amplicon_information,
@@ -100,8 +105,10 @@ def test_generate_amplicon_score_ignores_all_na_failed_amplicons():
     assert list(amp_score.index) == ["cell_high", "cell_low"]
     assert amp_score.loc["cell_high", "Read Count"] == 20
     assert amp_score.loc["cell_low", "Read Count"] == 10
-    assert amp_score.loc["cell_high", "Amplicon Score"] == 161
-    assert amp_score.loc["cell_low", "Amplicon Score"] == 0
+    assert amp_score.loc["cell_high", "Amplicon Score"] == 1
+    assert amp_score.loc["cell_low", "Amplicon Score"] == 1
+    assert amp_score.loc["cell_high", "Supported Amplicons"] == 1
+    assert amp_score.loc["cell_high", "Usable Amplicons"] == 1
 
 
 def test_generate_amplicon_score_rejects_duplicate_amplicon_columns():
@@ -161,6 +168,133 @@ def _write_completed_crispresso_output(crispresso_dir, amplicon_name="ampA"):
     finished_file = crispresso_dir / f"{amplicon_name}.finished"
     finished_file.write_text("done\n")
     return run_folder, finished_file
+
+
+def _write_filtered_allele_input(output_root, sequence):
+    path = cli._filtered_allele_fastq_path(output_root, "ampA")
+    path_obj = cli.os.path.abspath(path)
+    cli.os.makedirs(cli.os.path.dirname(path_obj), exist_ok=True)
+    with gzip.open(path_obj, "wt") as fout:
+        fout.write(f"@ampA:cellA:1\n{sequence}\n+\n{'I' * len(sequence)}\n")
+    return path_obj
+
+
+def _write_filtered_cache_info(output_root, run_folder, finished_file, input_hash):
+    info_file = f"{output_root}.crispresso.filtered.info.txt"
+    header = [
+        "name",
+        "input_sha256",
+        "crispresso_command",
+        "crispresso_run_folder",
+        "finished_file",
+        "log_file",
+        "crispresso_result",
+        "status",
+    ]
+    values = [
+        "ampA",
+        input_hash,
+        "cached command",
+        str(run_folder),
+        str(finished_file),
+        f"{output_root}.crispresso.filtered/ampA.log",
+        "Completed",
+        "Completed",
+    ]
+    with open(info_file, "w") as fout:
+        fout.write("\t".join(header) + "\n")
+        fout.write("\t".join(values) + "\n")
+
+
+def test_filtered_crispresso_cache_reuses_matching_input_hash(tmp_path):
+    output_root = str(tmp_path / "run")
+    base_crispresso_dir = tmp_path / "run.crispresso"
+    filtered_dir = tmp_path / "run.crispresso.filtered"
+    filtered_dir.mkdir()
+    allele_input = _write_filtered_allele_input(output_root, "ACGT")
+    input_hash = cli._decompressed_fastq_sha256(allele_input)
+    run_folder, finished_file = _write_completed_crispresso_output(filtered_dir)
+    _write_filtered_cache_info(output_root, run_folder, finished_file, input_hash)
+
+    result = run_crispresso_commands(
+        ["ampA"],
+        _make_crispresso_inputs(tmp_path),
+        output_root,
+        str(base_crispresso_dir),
+        False,
+        1,
+        alleles=True,
+    )
+
+    assert result["ampA"]["input_sha256"] == input_hash
+    assert run_folder.exists()
+
+
+def test_filtered_crispresso_cache_reruns_changed_input(tmp_path, monkeypatch):
+    output_root = str(tmp_path / "run")
+    base_crispresso_dir = tmp_path / "run.crispresso"
+    filtered_dir = tmp_path / "run.crispresso.filtered"
+    filtered_dir.mkdir()
+    old_input = _write_filtered_allele_input(output_root, "ACGT")
+    old_hash = cli._decompressed_fastq_sha256(old_input)
+    run_folder, finished_file = _write_completed_crispresso_output(filtered_dir)
+    stale_sentinel = run_folder / "stale.txt"
+    stale_sentinel.write_text("stale\n")
+    _write_filtered_cache_info(output_root, run_folder, finished_file, old_hash)
+
+    new_input = _write_filtered_allele_input(output_root, "TGCA")
+    new_hash = cli._decompressed_fastq_sha256(new_input)
+    jobs = []
+
+    class _AsyncResult:
+        def __init__(self, value):
+            self.value = value
+
+        def get(self, *_args, **_kwargs):
+            return self.value
+
+    class _Pool:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def map_async(self, function, submitted_jobs):
+            jobs.extend(submitted_jobs)
+            return _AsyncResult([function(job) for job in submitted_jobs])
+
+        def close(self):
+            pass
+
+        def join(self):
+            pass
+
+    def _fake_run(job):
+        assert not stale_sentinel.exists()
+        rerun_folder = cli.os.path.abspath(job["crispresso_run_folder"])
+        cli.os.makedirs(rerun_folder, exist_ok=True)
+        with open(cli.os.path.join(rerun_folder, "CRISPResso2_info.json"), "w") as fout:
+            fout.write("{}\n")
+        with open(job["finished_file"], "w") as fout:
+            fout.write("done\n")
+        return {"returncode": 0, "error": None, "command": job["command"]}
+
+    monkeypatch.setattr(cli.mp, "Pool", _Pool)
+    monkeypatch.setattr(cli, "run_crispresso_command", _fake_run)
+
+    result = run_crispresso_commands(
+        ["ampA"],
+        _make_crispresso_inputs(tmp_path),
+        output_root,
+        str(base_crispresso_dir),
+        False,
+        1,
+        alleles=True,
+    )
+
+    assert len(jobs) == 1
+    assert jobs[0]["input_sha256"] == new_hash
+    assert result["ampA"]["input_sha256"] == new_hash
+    written_info = pd.read_csv(f"{output_root}.crispresso.filtered.info.txt", sep="\t")
+    assert written_info.loc[0, "input_sha256"] == new_hash
 
 
 def test_run_crispresso_commands_does_not_pass_ignore_substitutions_to_crispresso(tmp_path):

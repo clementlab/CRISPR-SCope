@@ -19,6 +19,9 @@ assign_reads_to_all_possible_amplicons	False
 suppress_sub_crispresso_plots	False
 min_total_reads_per_barcode	10
 min_reads_per_amplicon_per_cell	0
+amplicon_score_min_reads_per_amplicon	5
+amplicon_score_min_covered_fraction	0.6666666666666666
+amplicon_score_max_barcode_rank	10000
 include_high_score_high_depth	True
 include_high_score_low_depth	False
 include_low_score_high_depth	False

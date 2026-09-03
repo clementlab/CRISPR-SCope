@@ -1,0 +1,435 @@
+CRISPR-SCope Branch Methods: Amplicon Breadth, Robustness, and Editing Rates
+============================================================================
+
+Purpose
+-------
+This note summarizes the amplicon-quality scoring and editing-rate analyses
+implemented in this branch. It is intended as a concise methods source for
+slides and for reproducing the analyses from CRISPRSCope outputs.
+
+The methods characterize variation among cells within one run. They quantify
+the consequences of cell selection, read coverage, and finite cell number;
+they do NOT estimate variation across biological replicates, establish a
+causal effect of cell-quality selection, or substitute for replicated
+experiments.
+
+
+1. Common inputs, cohorts, and eligibility
+-------------------------------------------
+
+The workflow joins two barcode-indexed tables:
+
+* <output_root>.editingSummary.txt: per-cell, per-amplicon first-pass editing
+  calls. Each amplicon has a modification percentage (modPct.<amplicon>) and
+  a total read count (totCount.<amplicon>).
+* <output_root>.amplicon_score.txt: per-barcode supported-breadth score,
+  barcode rank, and a cell-quality category (Color).
+
+For every statistical analysis, eligibility is determined separately for each
+amplicon. A cell is eligible when BOTH conditions hold:
+
+1. Its first-pass modification percentage for that amplicon is finite (not
+   missing or non-numeric).
+2. Its total read count for that same amplicon is at least
+   min_reads_per_amplicon_per_cell.
+
+The AllCells cohort contains all eligible cells. The InGroup contains eligible
+cells whose Color belongs to a category enabled by the include_* settings. If
+no include_* setting is supplied, the pipeline defaults to HQ_HI. Every other
+eligible cell, including an eligible cell without an amplicon-score row, belongs
+to the OutGroup.
+
+Unless otherwise noted, an editing-rate estimate is the arithmetic mean of
+the eligible cells' per-cell modification percentages. Eligibility, and hence
+the cell count, can differ by amplicon.
+
+
+2. Supported-amplicon breadth score
+-----------------------------------
+
+Goal
+~~~~
+Classify barcodes using the breadth of amplicon support rather than allowing a
+very deeply sequenced amplicon to compensate for missing coverage elsewhere.
+
+Inputs and usable amplicons
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The score begins with first-pass total read counts for every barcode and
+amplicon. Amplicon columns containing only missing values are removed. The
+remaining columns are usable amplicons. Duplicate amplicon names are rejected.
+
+The existing optional global gate is applied first: a barcode must have at
+least min_reads_per_amplicon_per_cell reads at EVERY usable amplicon to be
+scored. The default is 0, so this gate is inactive unless configured. After
+scoring and ranking, barcodes with fewer than min_total_reads_per_barcode total
+reads are removed from the downstream score table (default 10).
+
+Score calculation
+~~~~~~~~~~~~~~~~~
+Let U be the number of usable amplicons for a barcode and let S be the number
+of those amplicons with at least amplicon_score_min_reads_per_amplicon reads.
+Then:
+
+    Amplicon Score = S / U
+
+Each amplicon contributes either zero or one unit of support. Extra reads at a
+supported amplicon therefore do not increase the breadth score. The output
+also reports S as Supported Amplicons and U as Usable Amplicons.
+
+Barcode ranking and categories
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Barcodes are sorted by total read count, descending. Ties are broken
+deterministically by the barcode string in ascending order. The resulting
+one-based order is Barcode Rank.
+
+A barcode is high score if:
+
+    S >= ceil(amplicon_score_min_covered_fraction * U)
+
+It is high depth if:
+
+    Barcode Rank <= amplicon_score_max_barcode_rank
+
+The two binary classifications yield four Color codes:
+
+    HQ_HI  high supported breadth, high depth
+    HQ_LO  high supported breadth, low depth
+    LQ_HI  low supported breadth, high depth
+    LQ_LO  low supported breadth, low depth
+
+Default score settings
+~~~~~~~~~~~~~~~~~~~~~~
+* amplicon_score_min_reads_per_amplicon = 5
+* amplicon_score_min_covered_fraction = 2/3 (0.6666666666666666)
+* amplicon_score_max_barcode_rank = 10,000
+* min_total_reads_per_barcode = 10
+* min_reads_per_amplicon_per_cell = 0
+
+Outputs and interpretation
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+The score table is written as <output_root>.amplicon_score.txt and is always
+regenerated. This prevents a changed scoring setting or scoring algorithm from
+silently reusing stale barcode classifications. The score plot displays
+barcode rank versus supported-amplicon fraction, with the configured breadth and
+rank thresholds marked. The fields are also carried into the .h5ad export.
+
+The score is a coverage-breadth classification, not a measure of editing rate
+or a biological cell-state call.
+
+
+3. Editing-rate point estimates and bootstrap confidence intervals
+-------------------------------------------------------------------
+
+Goal
+~~~~
+Report within-run uncertainty for the mean first-pass editing rate in the
+AllCells and InGroup cohorts.
+
+Method
+~~~~~~
+For each amplicon, calculate the mean modification percentage in AllCells and
+in eligible InGroup cells. When a cohort has at least two eligible
+cells, repeatedly draw a sample the same size as that cohort WITH REPLACEMENT
+from its eligible cells and calculate the sample mean. The lower and upper
+limits are the alpha/2 and 1-alpha/2 quantiles of these bootstrap means, where
+alpha = 1 - confidence level.
+
+The workflow also produces bootstrap intervals for the InGroup-minus-AllCells
+effect. Each bootstrap replicate separately resamples the InGroup and OutGroup
+eligible cells, with replacement and at their observed sizes,
+then calculates:
+
+    InGroup mean - AllCells mean
+
+The InGroup-minus-OutGroup estimate and interval are also reported. The
+latter interval is derived from the paired InGroup-minus-AllCells bootstrap
+distribution using the observed cohort sizes.
+
+Defaults
+~~~~~~~~
+* editing_rate_ci_bootstrap_iterations = 10,000
+* editing_rate_ci_confidence_level = 0.95 (central percentile interval)
+* editing_rate_ci_seed = 42
+
+Output
+~~~~~~
+<output_root>.editingRateConfidenceIntervals.txt contains the AllCells,
+InGroup, OutGroup, and effect estimates, intervals, eligible cell counts,
+resampling settings, and status fields.
+
+Caveat
+~~~~~~
+These are pointwise bootstrap intervals for the cells in the current run, not
+confidence intervals across animals, samples, or other biological replicates.
+
+
+4. Unconditional InGroup permutation test
+-------------------------------------------------
+
+Goal
+~~~~
+Test whether the observed InGroup editing rate differs from what would be
+expected if the same number of eligible cells were assigned to the InGroup at
+random.
+
+Method
+~~~~~~
+For an amplicon with at least two InGroup and two OutGroup eligible cells,
+the observed effect is:
+
+    InGroup mean - AllCells mean
+
+For each permutation, InGroup labels are reassigned to a uniformly random
+subset of AllCells WITHOUT REPLACEMENT, preserving the observed InGroup size.
+The null effect is the permuted InGroup mean minus the fixed AllCells mean.
+
+The two-sided Monte Carlo p-value is:
+
+    (number of |null effect| >= |observed effect| + 1)
+    -------------------------------------------------
+                 (number of permutations + 1)
+
+Defaults and output
+~~~~~~~~~~~~~~~~~~~
+* editing_rate_ci_permutation_iterations = 10,000
+* The p-value is stored as permutation_p_value in
+  <output_root>.editingRateConfidenceIntervals.txt.
+* Summary: <output_root>.editingRateUnconditionalPermutation.txt
+* Every permuted InGroup mean:
+  <output_root>.editingRateUnconditionalPermutationSimulations.txt
+* Plot: <output_root>.16_EditingRateUnconditionalPermutation.{png,pdf}
+
+The summary and boxplot use the exact permutation draws used to calculate the
+p-value; they are not produced by a second resampling procedure. The plot
+includes every estimable amplicon regardless of the coverage-controlled
+significance threshold.
+
+This test controls only the InGroup size. It does not control for
+per-amplicon read-depth differences between cohorts.
+
+
+5. Coverage-controlled InGroup-versus-OutGroup test
+----------------------------------------------------------
+
+Goal
+~~~~
+Compare InGroup and OutGroup eligible cells while limiting the comparison
+to read-depth ranges represented in both cohorts.
+
+Coverage strata
+~~~~~~~~~~~~~~~
+Read counts from 0 through editing_rate_ci_coverage_exact_max_reads are exact
+strata. Counts above that threshold are placed into consecutive fixed-width
+bins. With defaults, counts 0-10 are exact strata and the next bins are 11-15,
+16-20, 21-25, and so on.
+
+Only mixed strata--those containing at least one InGroup and one OutGroup
+eligible cell--contribute to the controlled effect. A mixed stratum is weighted
+by:
+
+    n_InGroup * n_OutGroup / (n_InGroup + n_OutGroup)
+
+The coverage-controlled effect is the weighted mean of the within-stratum
+differences:
+
+    InGroup mean - OutGroup mean
+
+The same normalized weights are also applied separately to the stratum-specific
+InGroup and OutGroup means. These standardized means are reported as
+coverage_standardized_in_group_mean_pct and
+coverage_standardized_out_group_mean_pct. Their difference is exactly
+coverage_adjusted_in_group_minus_out_group_pct.
+
+Cells in single-cohort strata remain in the unconditional estimates but cannot
+contribute to this controlled comparison. The output reports retained cell
+counts and percentages, the number of mixed bins, and the remaining weighted
+within-bin coverage difference.
+
+Resampling and testing
+~~~~~~~~~~~~~~~~~~~~~~
+Within each mixed stratum, separate InGroup and OutGroup values are
+resampled WITH REPLACEMENT at their observed stratum sizes to form a percentile
+bootstrap interval for the weighted effect. For the null test, InGroup labels
+are reassigned WITHOUT REPLACEMENT only within each mixed stratum while
+preserving its observed InGroup count. The same finite-sample-corrected,
+two-sided permutation p-value formula is used.
+
+The controlled interval and test require at least two retained cells in each
+cohort overall. If there are no mixed strata or too few retained cells, the
+corresponding result is marked unavailable rather than imputed.
+
+Defaults and output
+~~~~~~~~~~~~~~~~~~~
+* editing_rate_ci_coverage_exact_max_reads = 10
+* editing_rate_ci_coverage_bin_width_reads = 5
+* Uses the bootstrap, permutation, confidence-level, and seed defaults above.
+* Results are written to <output_root>.editingRateConfidenceIntervals.txt in
+  coverage_standardized_* and coverage_adjusted_* columns.
+
+
+6. Multiple testing and significance-filtered figures
+------------------------------------------------------
+
+The unconditional permutation p-values and the coverage-controlled permutation
+p-values are each adjusted separately across all testable amplicons using the
+Benjamini-Hochberg false-discovery-rate procedure. The resulting columns are
+bh_adjusted_p_value and coverage_adjusted_bh_p_value.
+
+An amplicon is considered significant for the standard confidence-interval and
+percentage-based depth-stability figures when:
+
+    coverage_adjusted_bh_p_value <= 0.05
+
+The raw-versus-coverage-adjusted comparison figure retains all estimable
+amplicons. If no amplicon passes the controlled threshold, the
+significance-filtered figures are omitted while the tables and comparison
+figure remain available.
+
+
+7. Percentage-based finite-cohort depth stability
+-------------------------------------------------
+
+Goal
+~~~~
+Measure how estimated editing rates change when only a fraction of the
+eligible cells are retained.
+
+Method
+~~~~~~
+Each amplicon is analyzed independently for both the AllCells and InGroup
+cohorts. For a requested percentage p and E eligible cells, the sample size is:
+
+    ceil(E * p / 100), with a minimum of one cell
+
+For each iteration, a random ordering of the eligible cohort is drawn WITHOUT
+REPLACEMENT. The first portion of that same ordering supplies each requested
+sample size, so the 10%, 25%, 50%, 75%, and 90% samples are nested within an
+iteration. The method records the subsample mean, its difference from the full
+eligible-cohort mean in percentage points, and the absolute difference.
+
+Across iterations, it reports the median, central percentile interval, median
+absolute deviation, and 95th percentile absolute deviation. A deterministic
+100% full-cohort reference with zero deviation is appended automatically. A
+cohort with fewer than two eligible cells is reported as insufficient rather
+than repeatedly sampled.
+
+Defaults and output
+~~~~~~~~~~~~~~~~~~~
+* editing_rate_depth_stability_iterations = 1,000
+* editing_rate_depth_stability_percentages = 10,25,50,75,90
+* confidence level = 0.95; seed = 42 (shared with CI settings)
+* Table: <output_root>.editingRateDepthStability.txt
+* Absolute plot: <output_root>.12_EditingRateDepthStability.{png,pdf}
+* Relative plot: <output_root>.13_EditingRateRelativeDepthStability.{png,pdf}
+
+The absolute and relative percentage-based plots are restricted to amplicons
+that meet the coverage-controlled BH threshold. Relative deviations are scaled
+by each cohort's full editing rate. To avoid unstable ratios near zero, an
+amplicon appears in the relative plot only when its full InGroup editing
+rate is at least editing_rate_depth_stability_relative_min_hq_edit_pct (default
+1%).
+
+Caveat
+~~~~~~
+This is finite-cohort downsampling, not a confidence interval for new
+biological samples. It samples without replacement and therefore differs from
+the bootstrap confidence-interval procedure above.
+
+
+8. Fixed-cell-count finite-cohort depth stability
+--------------------------------------------------
+
+Goal
+~~~~
+Compare stability at identical absolute cell counts across amplicons and
+cohorts.
+
+Method
+~~~~~~
+For each amplicon and for both the AllCells and InGroup cohorts, the workflow
+repeats the finite-cohort sampling procedure WITHOUT REPLACEMENT at exactly:
+
+    100, 200, 400, 800, and 1,000 eligible cells
+
+Each replicate produces a mean and its percentage-point deviation from that
+cohort's full eligible-cohort mean. The table reports the median estimate,
+central interval, median absolute deviation, and 95th percentile absolute
+deviation across iterations.
+
+A requested size is used only when the cohort has at least that many eligible
+cells. Smaller cohorts are NOT capped to a smaller size and are NOT relabeled;
+they receive sample_n_cells = 0, status = insufficient_cells, and missing
+subsample statistics for that requested count.
+
+Defaults, output, and caveat
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* Uses editing_rate_depth_stability_iterations = 1,000,
+  editing_rate_ci_confidence_level = 0.95, and editing_rate_ci_seed = 42.
+* Table: <output_root>.editingRateFixedCellDepthStability.txt
+* Plot: <output_root>.15_EditingRateFixedCellDepthStability.{png,pdf}
+
+Unlike the percentage-based plots, the fixed-count plot includes all amplicons
+with available results regardless of editing-rate significance. It remains a
+within-run, finite-cohort sensitivity analysis rather than biological
+replication.
+
+
+9. I/O, partial-result, and cache robustness
+---------------------------------------------
+
+CRISPResso FASTQ readers inspect the file's gzip magic bytes rather than
+assuming compression from its filename. This permits gzip-compressed and plain
+text CRISPResso outputs to be read consistently by both the main parser and the
+.h5ad loader.
+
+An amplicon that fails or lacks a usable CRISPResso result is retained in the
+first-pass editing summary with missing values. It is not converted to an
+unedited zero. All-missing amplicons are excluded from the usable-amplicon set
+used for supported-breadth scoring, preventing a failed analysis from lowering
+every barcode's score.
+
+The amplicon-score table is regenerated on every run. The selected barcode set
+used for second-pass filtering is stored as a deterministic SHA-256 digest. If
+that set changes, filtered read and allele FASTQs are regenerated; the digest
+is retained only after all filtering stages succeed.
+
+For filtered, allele-mode CRISPResso runs, the cache records a SHA-256 digest of
+the decompressed allele FASTQ input. A changed or missing input, a previous
+failure, or missing completion output invalidates the cached result. Stale
+filtered CRISPResso outputs are removed before the affected amplicon is rerun.
+
+Filtered editing summaries use the second-pass filtered CRISPResso
+classification while retaining the corresponding original allele-support
+counts. Parser caches also record the ignore_substitutions setting so a change
+in substitution handling triggers reparsing.
+
+
+10. Recreating the workflow
+----------------------------
+
+1. From first-pass CRISPResso-derived summaries, create a barcode-by-amplicon
+   table of total read counts and compute the supported-breadth score and Color
+   categories exactly as in Section 2.
+2. Join the score table to editingSummary.txt by barcode. For every amplicon,
+   construct the eligible AllCells and InGroup cohorts using the two shared
+   eligibility rules in Section 1.
+3. Calculate AllCells and InGroup means; bootstrap their means and effects with
+   replacement for percentile intervals.
+4. Generate the unconditional null by repeatedly choosing a same-sized subset
+   of eligible cells without replacement. Generate the coverage-controlled
+   null by doing the same selection independently within mixed coverage strata.
+   Apply BH correction separately to the two families of permutation p-values.
+5. Store and summarize the same unconditional permutation draws used for its
+   p-value, and plot their distribution with the observed InGroup mean.
+6. For depth stability, draw nested percentage samples and fixed-size samples
+   without replacement, summarize deviations from each cohort's full mean, and
+   preserve unavailable fixed counts as insufficient rather than changing the
+   requested size.
+
+Reproducibility notes
+~~~~~~~~~~~~~~~~~~~~~
+All resampling is seeded from editing_rate_ci_seed (default 42) with distinct
+per-amplicon random streams. Therefore identical input tables and settings
+produce the same results in serial and parallel execution. Record the full
+settings file, CRISPRSCope version/commit, and generated tables with any figure
+used for reporting.

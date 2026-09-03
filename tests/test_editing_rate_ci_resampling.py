@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pandas.testing as pdt
+import pytest
 
 from CRISPRSCope.editing_rate_ci import (
     EditingRateCIConfig,
@@ -121,10 +122,12 @@ def test_coverage_adjustment_removes_effect_explained_by_coverage():
     ).iloc[0]
 
     assert result["permutation_p_value"] < 0.01
-    assert result["coverage_adjusted_group_minus_non_group_pct"] == 0.0
+    assert result["coverage_adjusted_in_group_minus_out_group_pct"] == 0.0
+    assert result["coverage_standardized_in_group_mean_pct"] == 0.0
+    assert result["coverage_standardized_out_group_mean_pct"] == 0.0
     assert result["coverage_adjusted_permutation_p_value"] == 1.0
-    assert result["coverage_adjusted_group_retained_pct"] == 100.0
-    assert result["coverage_adjusted_non_group_retained_pct"] == 50.0
+    assert result["coverage_adjusted_in_group_retained_pct"] == 100.0
+    assert result["coverage_adjusted_out_group_retained_pct"] == 50.0
 
 
 def test_coverage_adjustment_detects_within_bin_group_effect_for_configured_code():
@@ -154,7 +157,13 @@ def test_coverage_adjustment_detects_within_bin_group_effect_for_configured_code
         n_processes=1,
     ).iloc[0]
 
-    assert result["coverage_adjusted_group_minus_non_group_pct"] == 100.0
+    assert result["coverage_adjusted_in_group_minus_out_group_pct"] == 100.0
+    assert result["coverage_standardized_in_group_mean_pct"] == 100.0
+    assert result["coverage_standardized_out_group_mean_pct"] == 0.0
+    assert (
+        result["coverage_standardized_in_group_mean_pct"]
+        - result["coverage_standardized_out_group_mean_pct"]
+    ) == pytest.approx(result["coverage_adjusted_in_group_minus_out_group_pct"])
     assert result["coverage_adjusted_permutation_p_value"] < 0.01
     assert result["coverage_adjusted_bh_p_value"] < 0.01
     assert result["coverage_adjusted_mixed_bin_count"] == 1
@@ -184,8 +193,10 @@ def test_coverage_adjustment_reports_absent_common_support():
     ).iloc[0]
 
     assert result["coverage_adjusted_mixed_bin_count"] == 0
-    assert result["coverage_adjusted_group_n_cells"] == 0
-    assert np.isnan(result["coverage_adjusted_group_minus_non_group_pct"])
+    assert result["coverage_adjusted_in_group_n_cells"] == 0
+    assert np.isnan(result["coverage_standardized_in_group_mean_pct"])
+    assert np.isnan(result["coverage_standardized_out_group_mean_pct"])
+    assert np.isnan(result["coverage_adjusted_in_group_minus_out_group_pct"])
     assert np.isnan(result["coverage_adjusted_permutation_p_value"])
     assert result["coverage_adjusted_status"].startswith("no_mixed_coverage_bins")
 
@@ -239,9 +250,12 @@ def test_adding_excluded_rows_does_not_change_any_interval():
     )
 
     pdt.assert_frame_equal(original, extended)
-    assert original.loc[0, "valid_all_bootstrap_replicates"] == 500
-    assert original.loc[0, "valid_hq_bootstrap_replicates"] == 500
-    assert original.loc[0, "valid_delta_bootstrap_replicates"] == 500
+    assert original.loc[0, "valid_all_cells_bootstrap_replicates"] == 500
+    assert original.loc[0, "valid_in_group_bootstrap_replicates"] == 500
+    assert (
+        original.loc[0, "valid_in_group_minus_all_cells_bootstrap_replicates"]
+        == 500
+    )
     assert original.loc[0, "valid_permutation_replicates"] == 500
 
 
@@ -267,11 +281,11 @@ def test_delta_is_zero_when_all_eligible_cells_are_high_quality():
         n_processes=1,
     ).iloc[0]
 
-    assert result["hq_minus_all_pct"] == 0.0
-    assert result["delta_ci_lower_pct"] == 0.0
-    assert result["delta_ci_upper_pct"] == 0.0
-    assert result["valid_delta_bootstrap_replicates"] == 200
+    assert result["in_group_minus_all_cells_pct"] == 0.0
+    assert result["in_group_minus_all_cells_ci_lower_pct"] == 0.0
+    assert result["in_group_minus_all_cells_ci_upper_pct"] == 0.0
+    assert result["valid_in_group_minus_all_cells_bootstrap_replicates"] == 200
     assert result["valid_permutation_replicates"] == 0
     assert np.isnan(result["permutation_p_value"])
     assert np.isnan(result["bh_adjusted_p_value"])
-    assert result["status"] == "insufficient_non_hq_cells"
+    assert result["status"] == "insufficient_out_group_cells"
