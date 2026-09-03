@@ -9,11 +9,14 @@ import CRISPRSCope.editing_rate_ci as editing_rate_ci_module
 
 from CRISPRSCope.editing_rate_ci import (
     EditingRateDepthStabilityConfig,
+    FIXED_CELL_COUNT_DEPTHS,
     _create_depth_stability_figure,
     _depth_stability_amplicon_order,
     _nested_subsample_means,
     compute_editing_rate_depth_stability,
+    compute_editing_rate_fixed_cell_depth_stability,
     write_editing_rate_depth_stability_plot,
+    write_editing_rate_fixed_cell_depth_stability_plot,
 )
 
 
@@ -128,6 +131,110 @@ def test_percentages_use_cohort_sizes_and_append_full_reference():
         "subsample_interval_upper_pct",
     ]
     assert duplicate_depth_rows[summary_columns].nunique().eq(1).all()
+
+
+def test_fixed_cell_counts_are_exact_and_small_cohorts_are_not_capped():
+    n_cells = 1_200
+    index = [f"cell{value:04d}" for value in range(n_cells)]
+    editing_summary = pd.DataFrame(
+        {
+            "totCount.ampA": np.repeat(10, n_cells),
+            "modPct.ampA": np.linspace(0.0, 100.0, n_cells),
+            "totCount.ampB": np.repeat(10, n_cells),
+            "modPct.ampB": np.linspace(100.0, 0.0, n_cells),
+        },
+        index=index,
+    )
+    quality_scores = pd.DataFrame(
+        {"Color": ["HQ_HI"] * 600 + ["LQ_HI"] * 600},
+        index=index,
+    )
+    config = EditingRateDepthStabilityConfig(iterations=100, seed=13)
+
+    result = compute_editing_rate_fixed_cell_depth_stability(
+        editing_summary,
+        quality_scores,
+        ["HQ_HI"],
+        min_reads_per_amplicon_per_cell=1,
+        config=config,
+    )
+
+    assert set(result["requested_sample_n_cells"]) == set(FIXED_CELL_COUNT_DEPTHS)
+    assert "sample_percent" not in result.columns
+    assert "is_full_reference" not in result.columns
+
+    all_rows = result.loc[
+        (result["amplicon"] == "ampA") & (result["cohort"] == "all")
+    ].set_index("requested_sample_n_cells")
+    assert all_rows["sample_n_cells"].tolist() == list(FIXED_CELL_COUNT_DEPTHS)
+    assert all_rows["status"].eq("ok").all()
+
+    hq_rows = result.loc[
+        (result["amplicon"] == "ampA") & (result["cohort"] == "hq")
+    ].set_index("requested_sample_n_cells")
+    assert hq_rows.loc[[100, 200, 400], "sample_n_cells"].tolist() == [100, 200, 400]
+    assert hq_rows.loc[[800, 1000], "sample_n_cells"].tolist() == [0, 0]
+    assert hq_rows.loc[[800, 1000], "status"].eq("insufficient_cells").all()
+    assert hq_rows.loc[[800, 1000], "subsample_median_pct"].isna().all()
+
+
+def test_fixed_cell_count_results_are_deterministic_in_parallel_and_plot_all_amplicons(
+    tmp_path,
+    monkeypatch,
+):
+    n_cells = 1_000
+    index = [f"cell{value:04d}" for value in range(n_cells)]
+    editing_summary = pd.DataFrame(
+        {
+            "totCount.ampA": np.repeat(10, n_cells),
+            "modPct.ampA": np.linspace(0.0, 100.0, n_cells),
+            "totCount.ampB": np.repeat(10, n_cells),
+            "modPct.ampB": np.linspace(100.0, 0.0, n_cells),
+        },
+        index=index,
+    )
+    quality_scores = pd.DataFrame(
+        {"Color": ["HQ_HI"] * 500 + ["LQ_HI"] * 500},
+        index=index,
+    )
+    kwargs = {
+        "editing_summary": editing_summary,
+        "quality_scores": quality_scores,
+        "high_quality_codes": ["HQ_HI"],
+        "min_reads_per_amplicon_per_cell": 1,
+        "config": EditingRateDepthStabilityConfig(iterations=100, seed=23),
+    }
+    serial = compute_editing_rate_fixed_cell_depth_stability(n_processes=1, **kwargs)
+    parallel = compute_editing_rate_fixed_cell_depth_stability(n_processes=2, **kwargs)
+    pdt.assert_frame_equal(serial, parallel)
+
+    captured_orders = []
+    original_create_figure = editing_rate_ci_module._create_depth_stability_figure
+
+    def record_order(*args, **kwargs):
+        captured_orders.append(list(args[1]))
+        return original_create_figure(*args, **kwargs)
+
+    monkeypatch.setattr(
+        editing_rate_ci_module,
+        "_create_depth_stability_figure",
+        record_order,
+    )
+    metadata = write_editing_rate_fixed_cell_depth_stability_plot(
+        serial,
+        str(tmp_path / "run"),
+    )
+    assert len(metadata) == 1
+    assert set(captured_orders[0]) == {"ampA", "ampB"}
+    fixed_plot = Path(
+        str(tmp_path / "run") + ".15_EditingRateFixedCellDepthStability.png"
+    )
+    assert fixed_plot.is_file()
+    write_editing_rate_fixed_cell_depth_stability_plot(
+        serial.iloc[0:0],
+        str(tmp_path / "run"),
+    )
+    assert not fixed_plot.exists()
 
 
 def test_relative_metrics_use_inclusive_hq_threshold_and_own_cohort_denominators():
@@ -455,6 +562,7 @@ def test_stability_plots_filter_to_significant_amplicons_and_remove_stale_output
     for suffix in [
         ".12_EditingRateDepthStability",
         ".13_EditingRateRelativeDepthStability",
+        ".15_EditingRateFixedCellDepthStability",
     ]:
         assert not Path(output_root + suffix + ".png").exists()
         assert not Path(output_root + suffix + ".pdf").exists()

@@ -14,33 +14,35 @@ import pandas as pd
 
 RESULT_COLUMNS = [
     "amplicon",
-    "all_estimate_pct",
-    "all_ci_lower_pct",
-    "all_ci_upper_pct",
-    "all_n_cells",
-    "hq_estimate_pct",
-    "hq_ci_lower_pct",
-    "hq_ci_upper_pct",
-    "hq_n_cells",
-    "non_hq_estimate_pct",
-    "non_hq_n_cells",
-    "hq_minus_all_pct",
-    "hq_minus_non_hq_pct",
-    "hq_minus_non_hq_ci_lower_pct",
-    "hq_minus_non_hq_ci_upper_pct",
-    "delta_ci_lower_pct",
-    "delta_ci_upper_pct",
+    "all_cells_estimate_pct",
+    "all_cells_ci_lower_pct",
+    "all_cells_ci_upper_pct",
+    "all_cells_n_cells",
+    "in_group_estimate_pct",
+    "in_group_ci_lower_pct",
+    "in_group_ci_upper_pct",
+    "in_group_n_cells",
+    "out_group_estimate_pct",
+    "out_group_n_cells",
+    "in_group_minus_all_cells_pct",
+    "in_group_minus_out_group_pct",
+    "in_group_minus_out_group_ci_lower_pct",
+    "in_group_minus_out_group_ci_upper_pct",
+    "in_group_minus_all_cells_ci_lower_pct",
+    "in_group_minus_all_cells_ci_upper_pct",
     "permutation_p_value",
     "bh_adjusted_p_value",
-    "coverage_adjusted_group_minus_non_group_pct",
+    "coverage_standardized_in_group_mean_pct",
+    "coverage_standardized_out_group_mean_pct",
+    "coverage_adjusted_in_group_minus_out_group_pct",
     "coverage_adjusted_ci_lower_pct",
     "coverage_adjusted_ci_upper_pct",
     "coverage_adjusted_permutation_p_value",
     "coverage_adjusted_bh_p_value",
-    "coverage_adjusted_group_n_cells",
-    "coverage_adjusted_non_group_n_cells",
-    "coverage_adjusted_group_retained_pct",
-    "coverage_adjusted_non_group_retained_pct",
+    "coverage_adjusted_in_group_n_cells",
+    "coverage_adjusted_out_group_n_cells",
+    "coverage_adjusted_in_group_retained_pct",
+    "coverage_adjusted_out_group_retained_pct",
     "coverage_adjusted_mixed_bin_count",
     "coverage_adjusted_within_bin_coverage_difference_reads",
     "valid_coverage_adjusted_bootstrap_replicates",
@@ -48,9 +50,9 @@ RESULT_COLUMNS = [
     "coverage_exact_max_reads",
     "coverage_bin_width_reads",
     "coverage_adjusted_status",
-    "valid_all_bootstrap_replicates",
-    "valid_hq_bootstrap_replicates",
-    "valid_delta_bootstrap_replicates",
+    "valid_all_cells_bootstrap_replicates",
+    "valid_in_group_bootstrap_replicates",
+    "valid_in_group_minus_all_cells_bootstrap_replicates",
     "valid_permutation_replicates",
     "bootstrap_iterations",
     "permutation_iterations",
@@ -91,16 +93,72 @@ DEPTH_STABILITY_COLUMNS = [
     "p95_absolute_relative_deviation_pct",
 ]
 
+FIXED_CELL_COUNT_DEPTHS = (100, 200, 400, 800, 1000)
+
+FIXED_CELL_DEPTH_STABILITY_COLUMNS = [
+    "amplicon",
+    "cohort",
+    "requested_sample_n_cells",
+    "sample_n_cells",
+    "eligible_n_cells",
+    "full_estimate_pct",
+    "subsample_median_pct",
+    "subsample_interval_lower_pct",
+    "subsample_interval_upper_pct",
+    "median_deviation_pp",
+    "deviation_interval_lower_pp",
+    "deviation_interval_upper_pp",
+    "median_abs_deviation_from_full_pp",
+    "p95_abs_deviation_from_full_pp",
+    "valid_subsamples",
+    "requested_iterations",
+    "confidence_level",
+    "seed",
+    "status",
+]
+
+UNCONDITIONAL_PERMUTATION_SUMMARY_COLUMNS = [
+    "amplicon",
+    "all_estimate_pct",
+    "all_n_cells",
+    "selected_group_estimate_pct",
+    "selected_group_n_cells",
+    "selected_group_minus_all_pct",
+    "permuted_median_pct",
+    "permuted_ci_lower_pct",
+    "permuted_ci_upper_pct",
+    "selected_group_permutation_percentile",
+    "permutation_p_value",
+    "bh_adjusted_p_value",
+    "extreme_permutation_count",
+    "valid_permutations",
+    "requested_permutations",
+    "confidence_level",
+    "seed",
+    "status",
+]
+
+UNCONDITIONAL_PERMUTATION_SIMULATION_COLUMNS = [
+    "amplicon",
+    "permutation_index",
+    "permuted_selected_estimate_pct",
+    "selected_group_n_cells",
+    "eligible_all_n_cells",
+    "seed",
+]
+
 
 CI_PLOT_SUFFIXES = (
     ".10_EditingRateConfidenceIntervals",
     ".11_EditingRateQualityDelta",
     ".14_EditingRateCoverageAdjustedEffects",
+    ".16_EditingRateUnconditionalPermutation",
 )
 
 DEPTH_STABILITY_PLOT_SUFFIXES = (
     ".12_EditingRateDepthStability",
     ".13_EditingRateRelativeDepthStability",
+    ".15_EditingRateFixedCellDepthStability",
 )
 
 
@@ -334,6 +392,8 @@ def _coverage_adjusted_resampling(
     mixed_bin_count = 0
     total_weight = 0.0
     observed_numerator = 0.0
+    standardized_group_numerator = 0.0
+    standardized_non_group_numerator = 0.0
     coverage_difference_numerator = 0.0
     bootstrap_numerator = np.zeros(bootstrap_iterations, dtype=float)
     permutation_numerator = np.zeros(permutation_iterations, dtype=float)
@@ -355,9 +415,11 @@ def _coverage_adjusted_resampling(
         pooled_values = mod_values[in_bin]
         weight = n_group * n_non_group / float(n_group + n_non_group)
         total_weight += weight
-        observed_numerator += weight * (
-            group_values.mean() - non_group_values.mean()
-        )
+        group_mean = group_values.mean()
+        non_group_mean = non_group_values.mean()
+        standardized_group_numerator += weight * group_mean
+        standardized_non_group_numerator += weight * non_group_mean
+        observed_numerator += weight * (group_mean - non_group_mean)
         coverage_difference_numerator += weight * (
             count_values[bin_group].mean() - count_values[bin_non_group].mean()
         )
@@ -400,11 +462,13 @@ def _coverage_adjusted_resampling(
     if mixed_bin_count == 0:
         status_parts.append("no_mixed_coverage_bins")
     if n_group_common < 2:
-        status_parts.append("insufficient_coverage_adjusted_group_cells")
+        status_parts.append("insufficient_coverage_adjusted_in_group_cells")
     if n_non_group_common < 2:
-        status_parts.append("insufficient_coverage_adjusted_non_group_cells")
+        status_parts.append("insufficient_coverage_adjusted_out_group_cells")
 
     effect = np.nan
+    standardized_group_mean = np.nan
+    standardized_non_group_mean = np.nan
     ci_lower = np.nan
     ci_upper = np.nan
     permutation_p_value = np.nan
@@ -412,6 +476,10 @@ def _coverage_adjusted_resampling(
     valid_bootstrap_replicates = 0
     valid_permutation_replicates = 0
     if total_weight > 0:
+        standardized_group_mean = float(standardized_group_numerator / total_weight)
+        standardized_non_group_mean = float(
+            standardized_non_group_numerator / total_weight
+        )
         effect = float(observed_numerator / total_weight)
         within_bin_coverage_difference = float(
             coverage_difference_numerator / total_weight
@@ -432,6 +500,8 @@ def _coverage_adjusted_resampling(
 
     return {
         "effect": effect,
+        "standardized_group_mean": standardized_group_mean,
+        "standardized_non_group_mean": standardized_non_group_mean,
         "ci_lower": ci_lower,
         "ci_upper": ci_upper,
         "permutation_p_value": permutation_p_value,
@@ -516,6 +586,7 @@ def _bootstrap_one_amplicon(job: Dict) -> Dict:
         )
 
     permutation_null = np.array([], dtype=float)
+    permutation_selected_means = np.array([], dtype=float)
     permutation_p_value = np.nan
     if n_hq >= 2 and n_non_hq >= 2:
         permutation_null = _permutation_hq_minus_all(
@@ -525,6 +596,8 @@ def _bootstrap_one_amplicon(job: Dict) -> Dict:
             np.random.default_rng(permutation_seed),
             batch_size,
         )
+        permutation_selected_means = permutation_null + all_estimate
+        permutation_null = permutation_selected_means - all_estimate
         permutation_p_value = _two_sided_permutation_p_value(
             permutation_null, delta_estimate
         )
@@ -557,39 +630,45 @@ def _bootstrap_one_amplicon(job: Dict) -> Dict:
     if n_all < 2:
         status_parts.append("insufficient_all_cells")
     if n_hq < 2:
-        status_parts.append("insufficient_hq_cells")
+        status_parts.append("insufficient_in_group_cells")
     if n_non_hq < 2:
-        status_parts.append("insufficient_non_hq_cells")
+        status_parts.append("insufficient_out_group_cells")
 
     return {
         "amplicon": amplicon,
-        "all_estimate_pct": all_estimate,
-        "all_ci_lower_pct": all_lower,
-        "all_ci_upper_pct": all_upper,
-        "all_n_cells": n_all,
-        "hq_estimate_pct": hq_estimate,
-        "hq_ci_lower_pct": hq_lower,
-        "hq_ci_upper_pct": hq_upper,
-        "hq_n_cells": n_hq,
-        "non_hq_estimate_pct": non_hq_estimate,
-        "non_hq_n_cells": n_non_hq,
-        "hq_minus_all_pct": delta_estimate,
-        "hq_minus_non_hq_pct": hq_non_hq_delta,
-        "hq_minus_non_hq_ci_lower_pct": hq_non_hq_lower,
-        "hq_minus_non_hq_ci_upper_pct": hq_non_hq_upper,
-        "delta_ci_lower_pct": delta_lower,
-        "delta_ci_upper_pct": delta_upper,
+        "all_cells_estimate_pct": all_estimate,
+        "all_cells_ci_lower_pct": all_lower,
+        "all_cells_ci_upper_pct": all_upper,
+        "all_cells_n_cells": n_all,
+        "in_group_estimate_pct": hq_estimate,
+        "in_group_ci_lower_pct": hq_lower,
+        "in_group_ci_upper_pct": hq_upper,
+        "in_group_n_cells": n_hq,
+        "out_group_estimate_pct": non_hq_estimate,
+        "out_group_n_cells": n_non_hq,
+        "in_group_minus_all_cells_pct": delta_estimate,
+        "in_group_minus_out_group_pct": hq_non_hq_delta,
+        "in_group_minus_out_group_ci_lower_pct": hq_non_hq_lower,
+        "in_group_minus_out_group_ci_upper_pct": hq_non_hq_upper,
+        "in_group_minus_all_cells_ci_lower_pct": delta_lower,
+        "in_group_minus_all_cells_ci_upper_pct": delta_upper,
         "permutation_p_value": permutation_p_value,
         "bh_adjusted_p_value": np.nan,
-        "coverage_adjusted_group_minus_non_group_pct": coverage_adjusted["effect"],
+        "coverage_standardized_in_group_mean_pct": coverage_adjusted[
+            "standardized_group_mean"
+        ],
+        "coverage_standardized_out_group_mean_pct": coverage_adjusted[
+            "standardized_non_group_mean"
+        ],
+        "coverage_adjusted_in_group_minus_out_group_pct": coverage_adjusted["effect"],
         "coverage_adjusted_ci_lower_pct": coverage_adjusted["ci_lower"],
         "coverage_adjusted_ci_upper_pct": coverage_adjusted["ci_upper"],
         "coverage_adjusted_permutation_p_value": coverage_adjusted["permutation_p_value"],
         "coverage_adjusted_bh_p_value": np.nan,
-        "coverage_adjusted_group_n_cells": coverage_adjusted["group_n_cells"],
-        "coverage_adjusted_non_group_n_cells": coverage_adjusted["non_group_n_cells"],
-        "coverage_adjusted_group_retained_pct": coverage_adjusted["group_retained_pct"],
-        "coverage_adjusted_non_group_retained_pct": coverage_adjusted["non_group_retained_pct"],
+        "coverage_adjusted_in_group_n_cells": coverage_adjusted["group_n_cells"],
+        "coverage_adjusted_out_group_n_cells": coverage_adjusted["non_group_n_cells"],
+        "coverage_adjusted_in_group_retained_pct": coverage_adjusted["group_retained_pct"],
+        "coverage_adjusted_out_group_retained_pct": coverage_adjusted["non_group_retained_pct"],
         "coverage_adjusted_mixed_bin_count": coverage_adjusted["mixed_bin_count"],
         "coverage_adjusted_within_bin_coverage_difference_reads": coverage_adjusted[
             "within_bin_coverage_difference_reads"
@@ -603,27 +682,33 @@ def _bootstrap_one_amplicon(job: Dict) -> Dict:
         "coverage_exact_max_reads": coverage_exact_max_reads,
         "coverage_bin_width_reads": coverage_bin_width_reads,
         "coverage_adjusted_status": coverage_adjusted["status"],
-        "valid_all_bootstrap_replicates": len(all_bootstrap),
-        "valid_hq_bootstrap_replicates": len(hq_bootstrap),
-        "valid_delta_bootstrap_replicates": len(delta_bootstrap),
+        "valid_all_cells_bootstrap_replicates": len(all_bootstrap),
+        "valid_in_group_bootstrap_replicates": len(hq_bootstrap),
+        "valid_in_group_minus_all_cells_bootstrap_replicates": len(delta_bootstrap),
         "valid_permutation_replicates": len(permutation_null),
         "bootstrap_iterations": bootstrap_iterations,
         "permutation_iterations": permutation_iterations,
         "confidence_level": confidence_level,
         "seed": base_seed,
         "status": ";".join(status_parts) if status_parts else "ok",
+        "_unconditional_permutation_selected_means": (
+            permutation_selected_means
+            if job.get("retain_permutation_distribution", False)
+            else np.array([], dtype=float)
+        ),
     }
 
 
-def compute_editing_rate_confidence_intervals(
+def _compute_editing_rate_resampling_analyses(
     editing_summary: pd.DataFrame,
     quality_scores: pd.DataFrame,
     high_quality_codes: Iterable[str],
     min_reads_per_amplicon_per_cell: int,
     config: EditingRateCIConfig,
     n_processes: int = 1,
-) -> pd.DataFrame:
-    """Compute pointwise editing-rate intervals for all and the configured group."""
+    include_permutation_outputs: bool = False,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Compute editing-rate intervals and their unconditional permutation nulls."""
     if "Color" not in quality_scores.columns:
         raise ValueError("Amplicon score table must contain a 'Color' column")
     if config.coverage_exact_max_reads < 0:
@@ -654,11 +739,16 @@ def compute_editing_rate_confidence_intervals(
                 "batch_size": config.batch_size,
                 "coverage_exact_max_reads": config.coverage_exact_max_reads,
                 "coverage_bin_width_reads": config.coverage_bin_width_reads,
+                "retain_permutation_distribution": include_permutation_outputs,
             }
         )
 
     if not jobs:
-        return pd.DataFrame(columns=RESULT_COLUMNS)
+        return (
+            pd.DataFrame(columns=RESULT_COLUMNS),
+            pd.DataFrame(columns=UNCONDITIONAL_PERMUTATION_SUMMARY_COLUMNS),
+            pd.DataFrame(columns=UNCONDITIONAL_PERMUTATION_SIMULATION_COLUMNS),
+        )
 
     worker_count = min(max(1, int(n_processes)), len(jobs))
     if worker_count > 1:
@@ -673,7 +763,136 @@ def compute_editing_rate_confidence_intervals(
     result_frame["coverage_adjusted_bh_p_value"] = _benjamini_hochberg(
         result_frame["coverage_adjusted_permutation_p_value"]
     )
-    return result_frame
+    if not include_permutation_outputs:
+        return (
+            result_frame,
+            pd.DataFrame(columns=UNCONDITIONAL_PERMUTATION_SUMMARY_COLUMNS),
+            pd.DataFrame(columns=UNCONDITIONAL_PERMUTATION_SIMULATION_COLUMNS),
+        )
+
+    summary_rows = []
+    simulation_rows = []
+    for result, (_, row) in zip(results, result_frame.iterrows()):
+        permutation_means = np.asarray(
+            result["_unconditional_permutation_selected_means"], dtype=float
+        )
+        n_all = int(row["all_cells_n_cells"])
+        n_selected = int(row["in_group_n_cells"])
+        n_non_selected = int(row["out_group_n_cells"])
+        all_estimate = float(row["all_cells_estimate_pct"])
+        selected_estimate = float(row["in_group_estimate_pct"])
+        status_parts = []
+        if n_all < 2:
+            status_parts.append("insufficient_all_cells")
+        if n_selected < 2:
+            status_parts.append("insufficient_selected_group_cells")
+        if n_non_selected < 2:
+            status_parts.append("insufficient_non_selected_cells")
+        if len(permutation_means) and np.all(permutation_means == permutation_means[0]):
+            status_parts.append("invariant_permutation_distribution")
+
+        lower, upper = _percentile_interval(
+            permutation_means, config.confidence_level
+        )
+        extreme_count = 0
+        percentile = np.nan
+        if len(permutation_means):
+            observed_distance = abs(selected_estimate - all_estimate)
+            extreme_count = int(
+                np.count_nonzero(
+                    np.abs(permutation_means - all_estimate) >= observed_distance
+                )
+            )
+            percentile = float(
+                100.0 * np.mean(permutation_means <= selected_estimate)
+            )
+
+        summary_rows.append(
+            {
+                "amplicon": row["amplicon"],
+                "all_estimate_pct": all_estimate,
+                "all_n_cells": n_all,
+                "selected_group_estimate_pct": selected_estimate,
+                "selected_group_n_cells": n_selected,
+                "selected_group_minus_all_pct": row["in_group_minus_all_cells_pct"],
+                "permuted_median_pct": (
+                    float(np.median(permutation_means))
+                    if len(permutation_means)
+                    else np.nan
+                ),
+                "permuted_ci_lower_pct": lower,
+                "permuted_ci_upper_pct": upper,
+                "selected_group_permutation_percentile": percentile,
+                "permutation_p_value": row["permutation_p_value"],
+                "bh_adjusted_p_value": row["bh_adjusted_p_value"],
+                "extreme_permutation_count": extreme_count,
+                "valid_permutations": len(permutation_means),
+                "requested_permutations": config.permutation_iterations,
+                "confidence_level": config.confidence_level,
+                "seed": config.seed,
+                "status": ";".join(status_parts) if status_parts else "ok",
+            }
+        )
+        simulation_rows.extend(
+            {
+                "amplicon": row["amplicon"],
+                "permutation_index": permutation_index + 1,
+                "permuted_selected_estimate_pct": permuted_estimate,
+                "selected_group_n_cells": n_selected,
+                "eligible_all_n_cells": n_all,
+                "seed": config.seed,
+            }
+            for permutation_index, permuted_estimate in enumerate(permutation_means)
+        )
+
+    summaries = pd.DataFrame(summary_rows).reindex(
+        columns=UNCONDITIONAL_PERMUTATION_SUMMARY_COLUMNS
+    )
+    simulations = pd.DataFrame(simulation_rows).reindex(
+        columns=UNCONDITIONAL_PERMUTATION_SIMULATION_COLUMNS
+    )
+    return result_frame, summaries, simulations
+
+
+def compute_editing_rate_confidence_intervals(
+    editing_summary: pd.DataFrame,
+    quality_scores: pd.DataFrame,
+    high_quality_codes: Iterable[str],
+    min_reads_per_amplicon_per_cell: int,
+    config: EditingRateCIConfig,
+    n_processes: int = 1,
+) -> pd.DataFrame:
+    """Compute pointwise editing-rate intervals for all and the configured group."""
+    results, _, _ = _compute_editing_rate_resampling_analyses(
+        editing_summary,
+        quality_scores,
+        high_quality_codes,
+        min_reads_per_amplicon_per_cell,
+        config,
+        n_processes=n_processes,
+        include_permutation_outputs=False,
+    )
+    return results
+
+
+def compute_editing_rate_resampling_analyses(
+    editing_summary: pd.DataFrame,
+    quality_scores: pd.DataFrame,
+    high_quality_codes: Iterable[str],
+    min_reads_per_amplicon_per_cell: int,
+    config: EditingRateCIConfig,
+    n_processes: int = 1,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Compute intervals plus the stored unconditional permutation distribution."""
+    return _compute_editing_rate_resampling_analyses(
+        editing_summary,
+        quality_scores,
+        high_quality_codes,
+        min_reads_per_amplicon_per_cell,
+        config,
+        n_processes=n_processes,
+        include_permutation_outputs=True,
+    )
 
 
 def _nested_subsample_means(
@@ -997,6 +1216,192 @@ def compute_editing_rate_depth_stability(
     return result_frame.reindex(columns=DEPTH_STABILITY_COLUMNS)
 
 
+def _empty_fixed_cell_depth_stability_row(
+    amplicon: str,
+    cohort: str,
+    requested_sample_n_cells: int,
+    eligible_n_cells: int,
+    full_estimate: float,
+    job: Dict,
+) -> Dict:
+    """Describe a fixed cell-count request that cannot be sampled exactly."""
+    return {
+        "amplicon": amplicon,
+        "cohort": cohort,
+        "requested_sample_n_cells": requested_sample_n_cells,
+        "sample_n_cells": 0,
+        "eligible_n_cells": eligible_n_cells,
+        "full_estimate_pct": full_estimate,
+        "subsample_median_pct": np.nan,
+        "subsample_interval_lower_pct": np.nan,
+        "subsample_interval_upper_pct": np.nan,
+        "median_deviation_pp": np.nan,
+        "deviation_interval_lower_pp": np.nan,
+        "deviation_interval_upper_pp": np.nan,
+        "median_abs_deviation_from_full_pp": np.nan,
+        "p95_abs_deviation_from_full_pp": np.nan,
+        "valid_subsamples": 0,
+        "requested_iterations": job["iterations"],
+        "confidence_level": job["confidence_level"],
+        "seed": job["seed"],
+        "status": "insufficient_cells",
+    }
+
+
+def _fixed_cell_depth_stability_one_amplicon(job: Dict) -> List[Dict]:
+    """Evaluate exact fixed cell-count subsamples for one amplicon."""
+    amplicon = job["amplicon"]
+    mod_values = np.asarray(job["mod_values"], dtype=float)
+    count_values = np.asarray(job["count_values"], dtype=float)
+    hq_mask = np.asarray(job["hq_mask"], dtype=bool)
+    valid_all = (
+        np.isfinite(mod_values)
+        & np.isfinite(count_values)
+        & (count_values >= job["min_reads"])
+    )
+    requested_sizes = tuple(int(value) for value in job["fixed_sample_sizes"])
+    amplicon_seed = np.random.SeedSequence([job["seed"], job["amplicon_index"], 1])
+    cohort_seeds = amplicon_seed.spawn(2)
+    results: List[Dict] = []
+
+    for cohort_index, (cohort, cohort_mask) in enumerate(
+        (("all", valid_all), ("hq", valid_all & hq_mask))
+    ):
+        values = mod_values[cohort_mask]
+        eligible_n_cells = len(values)
+        full_estimate = float(np.mean(values)) if eligible_n_cells else np.nan
+        available_sizes = [
+            sample_size
+            for sample_size in requested_sizes
+            if eligible_n_cells >= sample_size and eligible_n_cells >= 2
+        ]
+        sampled_means = (
+            _nested_subsample_means(
+                values,
+                available_sizes,
+                job["iterations"],
+                np.random.default_rng(cohort_seeds[cohort_index]),
+            )
+            if available_sizes
+            else {}
+        )
+
+        for requested_sample_n_cells in requested_sizes:
+            if requested_sample_n_cells not in sampled_means:
+                results.append(
+                    _empty_fixed_cell_depth_stability_row(
+                        amplicon,
+                        cohort,
+                        requested_sample_n_cells,
+                        eligible_n_cells,
+                        full_estimate,
+                        job,
+                    )
+                )
+                continue
+
+            means = sampled_means[requested_sample_n_cells]
+            lower, upper = _percentile_interval(means, job["confidence_level"])
+            median = float(np.median(means))
+            deviations = means - full_estimate
+            deviation_lower, deviation_upper = _percentile_interval(
+                deviations, job["confidence_level"]
+            )
+            absolute_deviations = np.abs(deviations)
+            results.append(
+                {
+                    "amplicon": amplicon,
+                    "cohort": cohort,
+                    "requested_sample_n_cells": requested_sample_n_cells,
+                    "sample_n_cells": requested_sample_n_cells,
+                    "eligible_n_cells": eligible_n_cells,
+                    "full_estimate_pct": full_estimate,
+                    "subsample_median_pct": median,
+                    "subsample_interval_lower_pct": lower,
+                    "subsample_interval_upper_pct": upper,
+                    "median_deviation_pp": median - full_estimate,
+                    "deviation_interval_lower_pp": deviation_lower,
+                    "deviation_interval_upper_pp": deviation_upper,
+                    "median_abs_deviation_from_full_pp": float(
+                        np.median(absolute_deviations)
+                    ),
+                    "p95_abs_deviation_from_full_pp": float(
+                        np.quantile(absolute_deviations, 0.95)
+                    ),
+                    "valid_subsamples": len(means),
+                    "requested_iterations": job["iterations"],
+                    "confidence_level": job["confidence_level"],
+                    "seed": job["seed"],
+                    "status": "ok",
+                }
+            )
+    return results
+
+
+def compute_editing_rate_fixed_cell_depth_stability(
+    editing_summary: pd.DataFrame,
+    quality_scores: pd.DataFrame,
+    high_quality_codes: Iterable[str],
+    min_reads_per_amplicon_per_cell: int,
+    config: EditingRateDepthStabilityConfig,
+    n_processes: int = 1,
+) -> pd.DataFrame:
+    """Measure editing-rate stability at exact fixed eligible-cell counts."""
+    if "Color" not in quality_scores.columns:
+        raise ValueError("Amplicon score table must contain a 'Color' column")
+
+    row_labels = np.asarray([str(value) for value in editing_summary.index])
+    row_order = np.argsort(row_labels, kind="stable")
+    ordered_index = editing_summary.index[row_order]
+    ordered_summary = editing_summary.iloc[row_order]
+    hq_mask = (
+        quality_scores.reindex(ordered_index)["Color"]
+        .isin(set(high_quality_codes))
+        .to_numpy()
+    )
+    mod_columns = [
+        column for column in ordered_summary.columns if column.startswith("modPct.")
+    ]
+    jobs = []
+    for amplicon_index, mod_column in enumerate(mod_columns):
+        amplicon = mod_column.split(".", 1)[1]
+        count_column = f"totCount.{amplicon}"
+        if count_column not in ordered_summary.columns:
+            raise ValueError(
+                f"Missing matching count column for amplicon {amplicon!r}: {count_column}"
+            )
+        jobs.append(
+            {
+                "amplicon": amplicon,
+                "amplicon_index": amplicon_index,
+                "mod_values": pd.to_numeric(
+                    ordered_summary[mod_column], errors="coerce"
+                ).to_numpy(dtype=float),
+                "count_values": pd.to_numeric(
+                    ordered_summary[count_column], errors="coerce"
+                ).to_numpy(dtype=float),
+                "hq_mask": hq_mask,
+                "min_reads": min_reads_per_amplicon_per_cell,
+                "iterations": config.iterations,
+                "fixed_sample_sizes": FIXED_CELL_COUNT_DEPTHS,
+                "confidence_level": config.confidence_level,
+                "seed": config.seed,
+            }
+        )
+
+    if not jobs:
+        return pd.DataFrame(columns=FIXED_CELL_DEPTH_STABILITY_COLUMNS)
+
+    worker_count = min(max(1, int(n_processes)), len(jobs))
+    if worker_count > 1:
+        with mp.Pool(worker_count) as pool:
+            nested_results = pool.map(_fixed_cell_depth_stability_one_amplicon, jobs)
+    else:
+        nested_results = [_fixed_cell_depth_stability_one_amplicon(job) for job in jobs]
+    results = [row for amplicon_rows in nested_results for row in amplicon_rows]
+    return pd.DataFrame(results).reindex(columns=FIXED_CELL_DEPTH_STABILITY_COLUMNS)
+
+
 def _finite_interval_rows(results: pd.DataFrame, prefix: str) -> pd.Series:
     return (
         pd.to_numeric(results[f"{prefix}_estimate_pct"], errors="coerce").notna()
@@ -1034,16 +1439,85 @@ def remove_editing_rate_plot_artifacts(output_root: str) -> None:
     )
 
 
+def _row_plot_height(n_rows: int, *, legend: bool = False) -> float:
+    """Scale a horizontal interval plot to its number of amplicons."""
+    overhead = 2.4 if legend else 2.0
+    minimum = 3.8 if legend else 3.2
+    return max(minimum, overhead + (0.4 * max(1, n_rows)))
+
+
+def _interval_axis_limits(
+    lower_values: Sequence[float],
+    upper_values: Sequence[float],
+    *,
+    minimum_span: float,
+    include_zero: bool = False,
+    bounds: Optional[Tuple[float, float]] = None,
+) -> Optional[Tuple[float, float]]:
+    """Return padded, readable limits around finite confidence intervals."""
+    lower = np.asarray(lower_values, dtype=float)
+    upper = np.asarray(upper_values, dtype=float)
+    finite_values = np.concatenate(
+        [lower[np.isfinite(lower)], upper[np.isfinite(upper)]]
+    )
+    if finite_values.size == 0:
+        return None
+
+    data_lower = float(np.min(finite_values))
+    data_upper = float(np.max(finite_values))
+    if include_zero:
+        data_lower = min(0.0, data_lower)
+        data_upper = max(0.0, data_upper)
+
+    data_span = data_upper - data_lower
+    padded_span = max(minimum_span, data_span * 1.16)
+    center = (data_lower + data_upper) / 2.0
+    axis_lower = center - (padded_span / 2.0)
+    axis_upper = center + (padded_span / 2.0)
+
+    if bounds is not None:
+        bound_lower, bound_upper = bounds
+        bounded_span = bound_upper - bound_lower
+        if padded_span >= bounded_span:
+            return float(bound_lower), float(bound_upper)
+        if axis_lower < bound_lower:
+            axis_upper += bound_lower - axis_lower
+            axis_lower = bound_lower
+        if axis_upper > bound_upper:
+            axis_lower -= axis_upper - bound_upper
+            axis_upper = bound_upper
+        axis_lower = max(bound_lower, axis_lower)
+        axis_upper = min(bound_upper, axis_upper)
+
+    return float(axis_lower), float(axis_upper)
+
+
+def _depth_stability_layout(n_amplicons: int) -> Tuple[int, int, float, float]:
+    """Choose a compact facet grid and figure size for a stability plot."""
+    if n_amplicons < 1:
+        raise ValueError("At least one amplicon is required for a stability plot")
+    if n_amplicons <= 3:
+        n_columns = n_amplicons
+    elif n_amplicons == 4:
+        n_columns = 2
+    else:
+        n_columns = 3
+    n_rows = int(math.ceil(n_amplicons / n_columns))
+    figure_width = max(8.0, 6.0 * n_columns)
+    figure_height = 1.5 + (3.8 * n_rows)
+    return n_rows, n_columns, figure_width, figure_height
+
+
 def _write_coverage_adjusted_effect_plot(
     results: pd.DataFrame,
     output_root: str,
 ) -> List[Dict[str, str]]:
-    """Compare raw and coverage-adjusted group-minus-rest effects."""
+    """Compare raw and coverage-adjusted InGroup-minus-OutGroup effects."""
     required_columns = [
-        "hq_minus_non_hq_pct",
-        "hq_minus_non_hq_ci_lower_pct",
-        "hq_minus_non_hq_ci_upper_pct",
-        "coverage_adjusted_group_minus_non_group_pct",
+        "in_group_minus_out_group_pct",
+        "in_group_minus_out_group_ci_lower_pct",
+        "in_group_minus_out_group_ci_upper_pct",
+        "coverage_adjusted_in_group_minus_out_group_pct",
         "coverage_adjusted_ci_lower_pct",
         "coverage_adjusted_ci_upper_pct",
         "bh_adjusted_p_value",
@@ -1053,12 +1527,12 @@ def _write_coverage_adjusted_effect_plot(
     for column in required_columns:
         plotted[column] = pd.to_numeric(plotted[column], errors="coerce")
     raw_valid = (
-        plotted["hq_minus_non_hq_pct"].notna()
-        & plotted["hq_minus_non_hq_ci_lower_pct"].notna()
-        & plotted["hq_minus_non_hq_ci_upper_pct"].notna()
+        plotted["in_group_minus_out_group_pct"].notna()
+        & plotted["in_group_minus_out_group_ci_lower_pct"].notna()
+        & plotted["in_group_minus_out_group_ci_upper_pct"].notna()
     )
     adjusted_valid = (
-        plotted["coverage_adjusted_group_minus_non_group_pct"].notna()
+        plotted["coverage_adjusted_in_group_minus_out_group_pct"].notna()
         & plotted["coverage_adjusted_ci_lower_pct"].notna()
         & plotted["coverage_adjusted_ci_upper_pct"].notna()
     )
@@ -1067,30 +1541,30 @@ def _write_coverage_adjusted_effect_plot(
         return []
 
     plotted = plotted.sort_values(
-        "coverage_adjusted_group_minus_non_group_pct",
+        "coverage_adjusted_in_group_minus_out_group_pct",
         ascending=True,
         na_position="first",
     ).reset_index(drop=True)
-    fig_height = max(6.0, 0.42 * len(plotted) + 2.0)
+    fig_height = _row_plot_height(len(plotted), legend=True)
     fig, ax = plt.subplots(figsize=(12, fig_height))
     y_positions = np.arange(len(plotted), dtype=float)
     series = [
         (
-            "hq_minus_non_hq_pct",
-            "hq_minus_non_hq_ci_lower_pct",
-            "hq_minus_non_hq_ci_upper_pct",
+            "in_group_minus_out_group_pct",
+            "in_group_minus_out_group_ci_lower_pct",
+            "in_group_minus_out_group_ci_upper_pct",
             "bh_adjusted_p_value",
-            "Unconditional group minus remaining cells",
+            "Gray circle: InGroup minus OutGroup (unconditional BH)",
             "#7F7F7F",
             "o",
             -0.12,
         ),
         (
-            "coverage_adjusted_group_minus_non_group_pct",
+            "coverage_adjusted_in_group_minus_out_group_pct",
             "coverage_adjusted_ci_lower_pct",
             "coverage_adjusted_ci_upper_pct",
             "coverage_adjusted_bh_p_value",
-            "Coverage-adjusted group minus remaining cells",
+            "Blue square: coverage-adjusted InGroup minus OutGroup (coverage-adjusted BH)",
             "#4C78A8",
             "s",
             0.12,
@@ -1103,14 +1577,13 @@ def _write_coverage_adjusted_effect_plot(
             & plotted[lower_column].notna()
             & plotted[upper_column].notna()
         )
-        first_handle = None
         for row_index in np.flatnonzero(valid.to_numpy()):
             row = plotted.iloc[row_index]
             estimate = float(row[estimate_column])
             lower = float(row[lower_column])
             upper = float(row[upper_column])
             significant = np.isfinite(row[p_column]) and row[p_column] <= 0.05
-            handle = ax.errorbar(
+            ax.errorbar(
                 estimate,
                 y_positions[row_index] + offset,
                 xerr=np.array([[max(0.0, estimate - lower)], [max(0.0, upper - estimate)]]),
@@ -1120,23 +1593,51 @@ def _write_coverage_adjusted_effect_plot(
                 markerfacecolor=color if significant else "white",
                 markeredgecolor=color,
             )
-            if first_handle is None:
-                first_handle = handle
-        if first_handle is not None:
-            legend_handles.append((first_handle, label))
+        if valid.any():
+            # Use a separate, always-open handle so the legend does not inherit
+            # the significance state of whichever amplicon happened to plot first.
+            legend_handle = ax.errorbar(
+                [],
+                [],
+                xerr=np.empty((2, 0)),
+                fmt=marker,
+                capsize=3,
+                color=color,
+                markerfacecolor="white",
+                markeredgecolor=color,
+            )
+            legend_handles.append((legend_handle, label))
 
     ax.axvline(0, color="black", linestyle="--", linewidth=1)
     ax.set_yticks(y_positions)
     ax.set_yticklabels(plotted["amplicon"])
-    ax.set_xlabel("Configured group minus remaining cells (percentage points)")
+    ax.set_xlabel("InGroup minus OutGroup (percentage points)")
     ax.set_ylabel("Amplicon")
     ax.set_title("Raw and Coverage-Adjusted Editing-Rate Effects")
     if legend_handles:
         ax.legend(
             [item[0] for item in legend_handles],
             [item[1] for item in legend_handles],
-            title="Filled marker: BH-adjusted p-value ≤ 0.05",
+            title="Open = not significant; filled = corresponding BH-adjusted p-value ≤ 0.05",
         )
+    interval_limits = _interval_axis_limits(
+        np.concatenate(
+            [
+                plotted["in_group_minus_out_group_ci_lower_pct"].to_numpy(dtype=float),
+                plotted["coverage_adjusted_ci_lower_pct"].to_numpy(dtype=float),
+            ]
+        ),
+        np.concatenate(
+            [
+                plotted["in_group_minus_out_group_ci_upper_pct"].to_numpy(dtype=float),
+                plotted["coverage_adjusted_ci_upper_pct"].to_numpy(dtype=float),
+            ]
+        ),
+        minimum_span=2.0,
+        include_zero=True,
+    )
+    if interval_limits is not None:
+        ax.set_xlim(*interval_limits)
     ax.grid(axis="x", alpha=0.25)
     fig.tight_layout()
     plot_root = output_root + ".14_EditingRateCoverageAdjustedEffects"
@@ -1152,6 +1653,110 @@ def _write_coverage_adjusted_effect_plot(
                 "configured-group-minus-remaining-cell effects. Filled markers "
                 "denote significance after separate BH adjustments across all "
                 "testable amplicons."
+            ),
+        }
+    ]
+
+
+def write_editing_rate_unconditional_permutation_plot(
+    summaries: pd.DataFrame,
+    simulations: pd.DataFrame,
+    output_root: str,
+) -> List[Dict[str, str]]:
+    """Plot unconditional permutation distributions with selected-group estimates."""
+    suffix = ".16_EditingRateUnconditionalPermutation"
+    _remove_plot_artifacts(output_root, (suffix,))
+    if summaries.empty or simulations.empty:
+        return []
+
+    plotted = summaries.copy()
+    for column in (
+        "all_estimate_pct",
+        "selected_group_estimate_pct",
+        "valid_permutations",
+    ):
+        plotted[column] = pd.to_numeric(plotted[column], errors="coerce")
+    plotted = plotted.loc[
+        plotted["all_estimate_pct"].notna()
+        & plotted["selected_group_estimate_pct"].notna()
+        & (plotted["valid_permutations"] > 0)
+    ].copy()
+    if plotted.empty:
+        return []
+    plotted = plotted.sort_values(
+        ["all_estimate_pct", "amplicon"], ascending=[True, True]
+    ).reset_index(drop=True)
+    permutation_groups = {
+        str(amplicon): pd.to_numeric(
+            group["permuted_selected_estimate_pct"], errors="coerce"
+        )
+        .dropna()
+        .to_numpy(dtype=float)
+        for amplicon, group in simulations.groupby("amplicon", sort=False)
+    }
+    plotted = plotted.loc[
+        plotted["amplicon"].astype(str).map(
+            lambda amplicon: len(permutation_groups.get(amplicon, ())) > 0
+        )
+    ].reset_index(drop=True)
+    if plotted.empty:
+        return []
+
+    boxes = [permutation_groups[str(amplicon)] for amplicon in plotted["amplicon"]]
+    selected_estimates = plotted["selected_group_estimate_pct"].to_numpy(dtype=float)
+    all_plot_values = np.concatenate([np.concatenate(boxes), selected_estimates])
+    figure_width = max(10.0, 3.0 + (0.55 * len(plotted)))
+    fig, ax = plt.subplots(figsize=(figure_width, 8.0))
+    boxplot = ax.boxplot(
+        boxes,
+        patch_artist=True,
+        showfliers=False,
+        medianprops={"color": "#1F1F1F", "linewidth": 1.4},
+        whiskerprops={"color": "#4C78A8"},
+        capprops={"color": "#4C78A8"},
+    )
+    for box in boxplot["boxes"]:
+        box.set(facecolor="#A6C8E0", edgecolor="#4C78A8", alpha=0.9)
+    positions = np.arange(1, len(plotted) + 1, dtype=float)
+    ax.scatter(
+        positions,
+        selected_estimates,
+        marker="D",
+        s=44,
+        color="#F58518",
+        edgecolor="#1F1F1F",
+        linewidth=0.6,
+        zorder=4,
+        label="Configured analysis-group estimate",
+    )
+    ax.set_xticks(positions)
+    ax.set_xticklabels(plotted["amplicon"], rotation=65, ha="right", fontsize=9)
+    limits = _interval_axis_limits(
+        all_plot_values,
+        all_plot_values,
+        minimum_span=5.0,
+        bounds=(0.0, 100.0),
+    )
+    if limits is not None:
+        ax.set_ylim(*limits)
+    ax.set_xlabel("Amplicon")
+    ax.set_ylabel("Mean inferred allele editing percentage")
+    ax.set_title("Unconditional Selected-Group Permutation Distribution")
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    plot_root = output_root + suffix
+    fig.savefig(plot_root + ".pdf", bbox_inches="tight")
+    fig.savefig(plot_root + ".png", bbox_inches="tight")
+    plt.close(fig)
+    return [
+        {
+            "plot_name": plot_root,
+            "plot_title": "Unconditional editing-rate permutation distribution",
+            "plot_label": (
+                "For each amplicon, boxplots show configured-group-sized subsets "
+                "drawn without replacement from all eligible cells. Orange diamonds "
+                "show the observed configured analysis-group estimates."
             ),
         }
     ]
@@ -1174,18 +1779,22 @@ def write_editing_rate_ci_plots(results: pd.DataFrame, output_root: str) -> List
         )
         return comparison_metadata
 
-    ordered["all_estimate_pct"] = pd.to_numeric(ordered["all_estimate_pct"], errors="coerce")
-    ordered = ordered.sort_values("all_estimate_pct", ascending=True, na_position="first").reset_index(drop=True)
+    ordered["all_cells_estimate_pct"] = pd.to_numeric(
+        ordered["all_cells_estimate_pct"], errors="coerce"
+    )
+    ordered = ordered.sort_values(
+        "all_cells_estimate_pct", ascending=True, na_position="first"
+    ).reset_index(drop=True)
 
-    all_valid = _finite_interval_rows(ordered, "all")
-    hq_valid = _finite_interval_rows(ordered, "hq")
+    all_valid = _finite_interval_rows(ordered, "all_cells")
+    hq_valid = _finite_interval_rows(ordered, "in_group")
     if all_valid.any() or hq_valid.any():
-        fig_height = max(6.0, 0.4 * len(ordered) + 2.0)
+        fig_height = _row_plot_height(len(ordered), legend=True)
         fig, ax = plt.subplots(figsize=(12, fig_height))
         y_positions = np.arange(len(ordered), dtype=float)
         for valid, prefix, label, color, offset in [
-            (all_valid, "all", "All analyzable cells", "#4C78A8", -0.12),
-            (hq_valid, "hq", "Configured analysis-group cells", "#F58518", 0.12),
+            (all_valid, "all_cells", "AllCells", "#4C78A8", -0.12),
+            (hq_valid, "in_group", "InGroup", "#F58518", 0.12),
         ]:
             subset = ordered.loc[valid]
             positions = y_positions[valid.to_numpy()] + offset
@@ -1203,7 +1812,24 @@ def write_editing_rate_ci_plots(results: pd.DataFrame, output_root: str) -> List
             )
         ax.set_yticks(y_positions)
         ax.set_yticklabels(ordered["amplicon"])
-        ax.set_xlim(0, 100)
+        interval_limits = _interval_axis_limits(
+            np.concatenate(
+                [
+                    ordered.loc[all_valid, "all_cells_ci_lower_pct"].to_numpy(dtype=float),
+                    ordered.loc[hq_valid, "in_group_ci_lower_pct"].to_numpy(dtype=float),
+                ]
+            ),
+            np.concatenate(
+                [
+                    ordered.loc[all_valid, "all_cells_ci_upper_pct"].to_numpy(dtype=float),
+                    ordered.loc[hq_valid, "in_group_ci_upper_pct"].to_numpy(dtype=float),
+                ]
+            ),
+            minimum_span=5.0,
+            bounds=(0.0, 100.0),
+        )
+        if interval_limits is not None:
+            ax.set_xlim(*interval_limits)
         ax.set_xlabel("Mean inferred allele editing percentage")
         ax.set_ylabel("Amplicon")
         ax.set_title("Amplicon Editing-Rate Confidence Intervals")
@@ -1227,18 +1853,22 @@ def write_editing_rate_ci_plots(results: pd.DataFrame, output_root: str) -> List
         )
 
     delta_valid = (
-        pd.to_numeric(ordered["hq_minus_all_pct"], errors="coerce").notna()
-        & pd.to_numeric(ordered["delta_ci_lower_pct"], errors="coerce").notna()
-        & pd.to_numeric(ordered["delta_ci_upper_pct"], errors="coerce").notna()
+        pd.to_numeric(ordered["in_group_minus_all_cells_pct"], errors="coerce").notna()
+        & pd.to_numeric(
+            ordered["in_group_minus_all_cells_ci_lower_pct"], errors="coerce"
+        ).notna()
+        & pd.to_numeric(
+            ordered["in_group_minus_all_cells_ci_upper_pct"], errors="coerce"
+        ).notna()
     )
     if delta_valid.any():
-        fig_height = max(6.0, 0.4 * len(ordered) + 2.0)
+        fig_height = _row_plot_height(len(ordered))
         fig, ax = plt.subplots(figsize=(12, fig_height))
         subset = ordered.loc[delta_valid]
         positions = np.arange(len(ordered), dtype=float)[delta_valid.to_numpy()]
-        estimate = subset["hq_minus_all_pct"].to_numpy(dtype=float)
-        lower = subset["delta_ci_lower_pct"].to_numpy(dtype=float)
-        upper = subset["delta_ci_upper_pct"].to_numpy(dtype=float)
+        estimate = subset["in_group_minus_all_cells_pct"].to_numpy(dtype=float)
+        lower = subset["in_group_minus_all_cells_ci_lower_pct"].to_numpy(dtype=float)
+        upper = subset["in_group_minus_all_cells_ci_upper_pct"].to_numpy(dtype=float)
         ax.errorbar(
             estimate,
             positions,
@@ -1250,8 +1880,15 @@ def write_editing_rate_ci_plots(results: pd.DataFrame, output_root: str) -> List
         ax.axvline(0, color="black", linestyle="--", linewidth=1)
         ax.set_yticks(np.arange(len(ordered), dtype=float))
         ax.set_yticklabels(ordered["amplicon"])
-        ax.set_xlim(-100, 100)
-        ax.set_xlabel("Configured group minus all-cell editing percentage points")
+        interval_limits = _interval_axis_limits(
+            lower,
+            upper,
+            minimum_span=2.0,
+            include_zero=True,
+        )
+        if interval_limits is not None:
+            ax.set_xlim(*interval_limits)
+        ax.set_xlabel("InGroup minus AllCells editing percentage points")
         ax.set_ylabel("Amplicon")
         ax.set_title("Editing-Rate Sensitivity to Cell-Quality Selection")
         ax.grid(axis="x", alpha=0.25)
@@ -1330,43 +1967,55 @@ def _create_depth_stability_figure(
     title: str,
     y_label: str,
     subtitle: str = "",
+    x_column: str = "sample_percent",
+    x_label: str = "Eligible cohort retained (%)",
+    x_limits: Tuple[float, float] = (0.0, 102.0),
+    x_tick_values: Optional[Sequence[float]] = None,
+    annotate_missing: bool = False,
 ):
-    """Create a consistently labeled three-column stability facet grid."""
-    n_columns = 3
-    n_rows = int(math.ceil(len(amplicon_order) / n_columns))
+    """Create a stability facet grid scaled to the included amplicons."""
+    n_rows, n_columns, figure_width, figure_height = _depth_stability_layout(
+        len(amplicon_order)
+    )
+    if subtitle:
+        figure_height += 0.7
     fig, axes = plt.subplots(
         n_rows,
         n_columns,
-        figsize=(18, max(5.0, 3.8 * n_rows)),
+        figsize=(figure_width, figure_height),
         sharex=True,
         sharey=True,
         squeeze=False,
     )
     axes_flat = axes.ravel()
     finite_bounds = plotted[[lower_column, upper_column]].to_numpy(dtype=float)
-    maximum_absolute_bound = float(np.nanmax(np.abs(finite_bounds)))
+    finite_bounds = finite_bounds[np.isfinite(finite_bounds)]
+    maximum_absolute_bound = (
+        float(np.max(np.abs(finite_bounds))) if finite_bounds.size else 0.0
+    )
     y_limit = max(0.1, maximum_absolute_bound * 1.1)
     styles = {
         "all": ("All analyzable cells", "#4C78A8"),
-        "hq": ("Configured high-quality cells", "#F58518"),
+        "hq": ("Configured analysis-group cells", "#F58518"),
     }
     legend_handles = []
     legend_labels = []
 
     for facet_index, (axis, amplicon) in enumerate(zip(axes_flat, amplicon_order)):
         amplicon_rows = plotted.loc[plotted["amplicon"] == amplicon]
+        plotted_cohort = False
         for cohort, (label, color) in styles.items():
             cohort_rows = amplicon_rows.loc[
                 amplicon_rows["cohort"] == cohort
-            ].sort_values("sample_percent")
+            ].sort_values(x_column)
             if cohort_rows.empty:
                 continue
-            percentages = cohort_rows["sample_percent"].to_numpy(dtype=float)
+            x_values = cohort_rows[x_column].to_numpy(dtype=float)
             medians = cohort_rows[median_column].to_numpy(dtype=float)
             lower = cohort_rows[lower_column].to_numpy(dtype=float)
             upper = cohort_rows[upper_column].to_numpy(dtype=float)
             line = axis.plot(
-                percentages,
+                x_values,
                 medians,
                 marker="o",
                 markersize=3,
@@ -1374,13 +2023,25 @@ def _create_depth_stability_figure(
                 color=color,
                 label=label,
             )[0]
-            axis.fill_between(percentages, lower, upper, color=color, alpha=0.2)
+            axis.fill_between(x_values, lower, upper, color=color, alpha=0.2)
+            plotted_cohort = True
             if label not in legend_labels:
                 legend_handles.append(line)
                 legend_labels.append(label)
+        if annotate_missing and not plotted_cohort:
+            axis.text(
+                0.5,
+                0.5,
+                "No cohort has at least 100 eligible cells",
+                ha="center",
+                va="center",
+                transform=axis.transAxes,
+                fontsize=8,
+                color="#555555",
+            )
         axis.axhline(0, color="black", linestyle="--", linewidth=0.8, alpha=0.7)
         axis.set_title(amplicon, fontsize=8)
-        axis.set_xlim(0, 102)
+        axis.set_xlim(*x_limits)
         axis.set_ylim(-y_limit, y_limit)
         axis.grid(alpha=0.2)
         axis.tick_params(
@@ -1397,11 +2058,14 @@ def _create_depth_stability_figure(
     for axis in axes_flat[len(amplicon_order):]:
         axis.set_visible(False)
 
-    tick_values = sorted(plotted["sample_percent"].unique())
+    tick_values = (
+        list(x_tick_values)
+        if x_tick_values is not None
+        else sorted(plotted[x_column].dropna().unique())
+    )
     for axis in axes_flat[:len(amplicon_order)]:
         axis.set_xticks(tick_values)
 
-    x_label = "Eligible cohort retained (%)"
     for row_index in range(n_rows):
         row_start = row_index * n_columns
         populated_count = min(n_columns, len(amplicon_order) - row_start)
@@ -1411,14 +2075,14 @@ def _create_depth_stability_figure(
         axes[row_index, label_column].set_xlabel(x_label, fontsize=9, labelpad=5)
         axes[row_index, 0].set_ylabel(y_label, fontsize=8, labelpad=7)
 
-    fig.suptitle(title, fontsize=16, y=0.997)
+    fig.suptitle(title, fontsize=16, y=0.99)
     if subtitle:
-        fig.text(0.5, 0.981, subtitle, ha="center", va="top", fontsize=10)
-        legend_y = 0.967
-        layout_top = 0.94
+        fig.text(0.5, 0.935, subtitle, ha="center", va="top", fontsize=10)
+        legend_y = 0.875
+        layout_top = 0.78
     else:
-        legend_y = 0.981
-        layout_top = 0.955
+        legend_y = 0.935
+        layout_top = 0.85
     if legend_handles:
         fig.legend(
             legend_handles,
@@ -1427,7 +2091,7 @@ def _create_depth_stability_figure(
             bbox_to_anchor=(0.5, legend_y),
             ncol=2,
         )
-    fig.tight_layout(rect=(0.02, 0.01, 1.0, layout_top), h_pad=2.4, w_pad=1.0)
+    fig.tight_layout(rect=(0.02, 0.01, 1.0, layout_top), h_pad=2.0, w_pad=1.0)
     return fig
 
 
@@ -1567,3 +2231,108 @@ def write_editing_rate_depth_stability_plot(
         }
     )
     return plot_metadata
+
+
+def _fixed_cell_depth_stability_amplicon_order(results: pd.DataFrame) -> List[str]:
+    """Order fixed-count panels by configured-group then all-cell editing rate."""
+    references = results[
+        ["amplicon", "cohort", "full_estimate_pct"]
+    ].drop_duplicates(["amplicon", "cohort"])
+    references = references.copy()
+    references["full_estimate_pct"] = pd.to_numeric(
+        references["full_estimate_pct"], errors="coerce"
+    )
+    reference_lookup = references.pivot_table(
+        index="amplicon",
+        columns="cohort",
+        values="full_estimate_pct",
+        aggfunc="first",
+    )
+
+    def sort_key(amplicon: str) -> Tuple:
+        hq_estimate = (
+            reference_lookup.at[amplicon, "hq"]
+            if amplicon in reference_lookup.index and "hq" in reference_lookup
+            else np.nan
+        )
+        all_estimate = (
+            reference_lookup.at[amplicon, "all"]
+            if amplicon in reference_lookup.index and "all" in reference_lookup
+            else np.nan
+        )
+        hq_is_missing = not np.isfinite(hq_estimate)
+        all_is_missing = not np.isfinite(all_estimate)
+        return (
+            hq_is_missing,
+            -float(hq_estimate) if not hq_is_missing else 0.0,
+            all_is_missing,
+            -float(all_estimate) if not all_is_missing else 0.0,
+            str(amplicon),
+        )
+
+    amplicons = results["amplicon"].drop_duplicates().astype(str).tolist()
+    return sorted(amplicons, key=sort_key)
+
+
+def write_editing_rate_fixed_cell_depth_stability_plot(
+    results: pd.DataFrame,
+    output_root: str,
+) -> List[Dict[str, str]]:
+    """Write an all-amplicon exploratory stability plot at fixed cell counts."""
+    plot_suffix = ".15_EditingRateFixedCellDepthStability"
+    _remove_plot_artifacts(output_root, (plot_suffix,))
+    if results.empty:
+        return []
+
+    all_amplicon_order = _fixed_cell_depth_stability_amplicon_order(results)
+    numeric_columns = [
+        "requested_sample_n_cells",
+        "median_deviation_pp",
+        "deviation_interval_lower_pp",
+        "deviation_interval_upper_pp",
+    ]
+    plotted = results.copy()
+    for column in numeric_columns:
+        plotted[column] = pd.to_numeric(plotted[column], errors="coerce")
+    plotted = plotted.loc[plotted["status"] == "ok"].dropna(
+        subset=[
+            "requested_sample_n_cells",
+            "median_deviation_pp",
+            "deviation_interval_lower_pp",
+            "deviation_interval_upper_pp",
+        ]
+    )
+
+    figure = _create_depth_stability_figure(
+        plotted,
+        all_amplicon_order,
+        median_column="median_deviation_pp",
+        lower_column="deviation_interval_lower_pp",
+        upper_column="deviation_interval_upper_pp",
+        title="Editing-Rate Stability Across Fixed Cell Counts",
+        subtitle=(
+            "Exploratory analysis; all amplicons are shown regardless of "
+            "editing-rate significance"
+        ),
+        y_label="Deviation from full-cohort editing rate (percentage points)",
+        x_column="requested_sample_n_cells",
+        x_label="Eligible cells sampled",
+        x_limits=(0.0, 1050.0),
+        x_tick_values=FIXED_CELL_COUNT_DEPTHS,
+        annotate_missing=True,
+    )
+    plot_root = output_root + plot_suffix
+    _save_depth_stability_figure(figure, plot_root)
+    return [
+        {
+            "plot_name": plot_root,
+            "plot_title": "Editing-rate stability at fixed cell counts",
+            "plot_label": (
+                "Exploratory fixed-count downsampling bands for all analyzable "
+                "and configured analysis-group cells at 100, 200, 400, 800, "
+                "and 1,000 cells. Every amplicon is shown regardless of "
+                "editing-rate significance; unavailable cohort sizes are not "
+                "resampled or capped."
+            ),
+        }
+    ]

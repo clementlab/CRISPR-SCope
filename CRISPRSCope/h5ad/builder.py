@@ -48,6 +48,8 @@ class CRISPRSCopeAnnDataBuilder:
         obs_df.fillna(
             {
                 "Amplicon Score": 0.0,
+                "Supported Amplicons": 0,
+                "Usable Amplicons": 0,
                 "Read Count": 0,
                 "Barcode Rank": -1,
                 "Color": "Unknown",

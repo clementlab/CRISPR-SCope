@@ -6,7 +6,9 @@ def test_stratify_emits_only_short_codes():
     df = pd.DataFrame({
         'Barcode': ['BC1','BC2','BC3','BC4'],
         'Barcode Rank': [1, 500, 15000, 20000],
-        'Amplicon Score': [2.0, 0.2, 1.5, 0.0],
+        'Amplicon Score': [20/30, 19/30, 25/30, 2/30],
+        'Supported Amplicons': [20, 19, 25, 2],
+        'Usable Amplicons': [30, 30, 30, 30],
     }).set_index('Barcode')
 
     out = stratify_data(df.copy())
@@ -20,11 +22,11 @@ def test_stratify_emits_only_short_codes():
     assert not bad, f"Unexpected codes present: {bad}"
 
     # spot-check expected assignments from canonical thresholds
-    # BC1: rank=1, score=2.0 => HQ_HI
+    # BC1: rank=1, supported breadth=20/30 => HQ_HI
     assert out.loc['BC1','Color'] == 'HQ_HI'
-    # BC2: rank=500, score=0.2 => LQ_HI
+    # BC2: rank=500, supported breadth=19/30 => LQ_HI
     assert out.loc['BC2','Color'] == 'LQ_HI'
-    # BC3: rank=15000, score=1.5 => HQ_LO
+    # BC3: rank=15000, supported breadth=25/30 => HQ_LO
     assert out.loc['BC3','Color'] == 'HQ_LO'
     # BC4: rank=20000, score=0.0 => LQ_LO
     assert out.loc['BC4','Color'] == 'LQ_LO'

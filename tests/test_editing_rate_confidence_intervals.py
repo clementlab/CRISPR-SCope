@@ -44,17 +44,18 @@ def test_compute_uses_cell_weighted_rates_and_configured_hq_codes():
         n_processes=1,
     ).set_index("amplicon")
 
-    assert result.loc["ampA", "all_n_cells"] == 3
-    assert result.loc["ampA", "hq_n_cells"] == 2
-    assert result.loc["ampA", "all_estimate_pct"] == 50.0
-    assert result.loc["ampA", "hq_estimate_pct"] == 75.0
-    assert result.loc["ampA", "hq_minus_all_pct"] == 25.0
-    assert result.loc["ampA", "non_hq_estimate_pct"] == 0.0
-    assert result.loc["ampA", "non_hq_n_cells"] == 1
-    assert result.loc["ampA", "hq_minus_non_hq_pct"] == 75.0
+    assert result.loc["ampA", "all_cells_n_cells"] == 3
+    assert result.loc["ampA", "in_group_n_cells"] == 2
+    assert result.loc["ampA", "all_cells_estimate_pct"] == 50.0
+    assert result.loc["ampA", "in_group_estimate_pct"] == 75.0
+    assert result.loc["ampA", "in_group_minus_all_cells_pct"] == 25.0
+    assert result.loc["ampA", "out_group_estimate_pct"] == 0.0
+    assert result.loc["ampA", "out_group_n_cells"] == 1
+    assert result.loc["ampA", "in_group_minus_out_group_pct"] == 75.0
+    assert not any("hq" in column or "non_hq" in column for column in result.columns)
     assert np.isnan(result.loc["ampA", "permutation_p_value"])
-    assert result.loc["ampA", "status"] == "insufficient_non_hq_cells"
-    assert 0 <= result.loc["ampA", "all_ci_lower_pct"] <= result.loc["ampA", "all_ci_upper_pct"] <= 100
+    assert result.loc["ampA", "status"] == "insufficient_out_group_cells"
+    assert 0 <= result.loc["ampA", "all_cells_ci_lower_pct"] <= result.loc["ampA", "all_cells_ci_upper_pct"] <= 100
 
 
 def test_parallel_and_serial_results_are_identical():
@@ -93,11 +94,11 @@ def test_insufficient_hq_cells_retains_estimate_but_not_interval():
         n_processes=1,
     ).iloc[0]
 
-    assert result["hq_n_cells"] == 1
-    assert result["hq_estimate_pct"] == 0.0
-    assert np.isnan(result["hq_ci_lower_pct"])
-    assert np.isnan(result["delta_ci_lower_pct"])
-    assert result["status"] == "insufficient_hq_cells;insufficient_non_hq_cells"
+    assert result["in_group_n_cells"] == 1
+    assert result["in_group_estimate_pct"] == 0.0
+    assert np.isnan(result["in_group_ci_lower_pct"])
+    assert np.isnan(result["in_group_minus_all_cells_ci_lower_pct"])
+    assert result["status"] == "insufficient_in_group_cells;insufficient_out_group_cells"
 
 
 def test_two_sided_permutation_detects_separation_and_is_sign_symmetric():
