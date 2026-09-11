@@ -71,10 +71,15 @@ def test_cli_writer_creates_table_plots_and_report_links(tmp_path):
         ("Unconditional permutation summary", str(tmp_path / "run.editingRateUnconditionalPermutation.txt")),
         ("Unconditional permutation simulations", str(tmp_path / "run.editingRateUnconditionalPermutationSimulations.txt")),
     ]
+    observed_centered_plot = next(
+        plot for plot in plot_objects
+        if plot.name.endswith(".17_EditingRateObservedCenteredPermutationSwarm")
+    )
+    assert observed_centered_plot.datas == permutation_plot.datas
     assert all(
         plot.datas == [("Editing-rate confidence intervals", str(table_path))]
         for plot in plot_objects
-        if plot is not permutation_plot
+        if plot not in (permutation_plot, observed_centered_plot)
     )
 
     report_path = tmp_path / "run.html"
@@ -93,6 +98,7 @@ def test_cli_writer_creates_table_plots_and_report_links(tmp_path):
     assert "Unconditional editing-rate permutation distribution" in report_text
     assert "run.editingRateUnconditionalPermutation.txt" in report_text
     assert "run.editingRateUnconditionalPermutationSimulations.txt" in report_text
+    assert "Observed-centered unconditional permutation swarm" in report_text
 
 
 def test_cli_writer_keeps_table_and_comparison_plot_without_significance(tmp_path):
@@ -123,10 +129,14 @@ def test_cli_writer_keeps_table_and_comparison_plot_without_significance(tmp_pat
     assert table_path.is_file()
     assert pd.read_csv(table_path, sep="\t")["amplicon"].tolist() == ["ampA"]
     assert significant_amplicons == []
-    assert len(plot_objects) == 2
+    assert len(plot_objects) == 3
     assert any(plot.name.endswith(".14_EditingRateCoverageAdjustedEffects") for plot in plot_objects)
     assert any(
         plot.name.endswith(".16_EditingRateUnconditionalPermutation")
+        for plot in plot_objects
+    )
+    assert any(
+        plot.name.endswith(".17_EditingRateObservedCenteredPermutationSwarm")
         for plot in plot_objects
     )
     assert not list(tmp_path.glob("run.10_EditingRateConfidenceIntervals.*"))
@@ -162,35 +172,19 @@ def test_depth_stability_writer_creates_table_plot_and_report_link(tmp_path):
     )
 
     table_path = tmp_path / "run.editingRateDepthStability.txt"
-    fixed_table_path = tmp_path / "run.editingRateFixedCellDepthStability.txt"
     assert table_path.is_file()
-    assert fixed_table_path.is_file()
     assert (tmp_path / "run.12_EditingRateDepthStability.png").is_file()
     assert (tmp_path / "run.12_EditingRateDepthStability.pdf").is_file()
-    assert (tmp_path / "run.13_EditingRateRelativeDepthStability.png").is_file()
-    assert (tmp_path / "run.13_EditingRateRelativeDepthStability.pdf").is_file()
-    assert (tmp_path / "run.15_EditingRateFixedCellDepthStability.png").is_file()
-    assert (tmp_path / "run.15_EditingRateFixedCellDepthStability.pdf").is_file()
-    assert len(plot_objects) == 3
-    assert [plot.datas for plot in plot_objects[:2]] == [
-        [("Editing-rate depth stability", str(table_path))],
-        [("Editing-rate depth stability", str(table_path))],
-    ]
-    assert plot_objects[2].datas == [
-        ("Fixed-cell-count editing-rate stability", str(fixed_table_path))
+    assert not list(tmp_path.glob("run.13_EditingRateRelativeDepthStability.*"))
+    assert not list(tmp_path.glob("run.15_EditingRateFixedCellDepthStability.*"))
+    assert not (tmp_path / "run.editingRateFixedCellDepthStability.txt").exists()
+    assert len(plot_objects) == 1
+    assert plot_objects[0].datas == [
+        ("Editing-rate depth stability", str(table_path))
     ]
 
     table = pd.read_csv(table_path, sep="\t")
-    assert {
-        "hq_full_estimate_pct",
-        "relative_min_hq_edit_pct",
-        "relative_plot_eligible",
-        "median_relative_deviation_pct",
-        "relative_deviation_interval_lower_pct",
-        "relative_deviation_interval_upper_pct",
-        "median_absolute_relative_deviation_pct",
-        "p95_absolute_relative_deviation_pct",
-    }.issubset(table.columns)
+    assert not any("relative" in column for column in table.columns)
 
     report_path = tmp_path / "run.html"
     cli.make_report(
@@ -204,10 +198,9 @@ def test_depth_stability_writer_creates_table_plot_and_report_link(tmp_path):
 
     report_text = report_path.read_text()
     assert "Editing-rate cell-depth stability" in report_text
-    assert "Relative editing-rate cell-depth stability" in report_text
     assert "run.editingRateDepthStability.txt" in report_text
-    assert "Editing-rate stability at fixed cell counts" in report_text
-    assert "run.editingRateFixedCellDepthStability.txt" in report_text
+    assert "Relative editing-rate cell-depth stability" not in report_text
+    assert "Editing-rate stability at fixed cell counts" not in report_text
 
 
 def test_cli_writer_keeps_table_but_omits_report_plots_without_significance(tmp_path):

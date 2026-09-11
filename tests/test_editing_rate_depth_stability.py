@@ -9,14 +9,11 @@ import CRISPRSCope.editing_rate_ci as editing_rate_ci_module
 
 from CRISPRSCope.editing_rate_ci import (
     EditingRateDepthStabilityConfig,
-    FIXED_CELL_COUNT_DEPTHS,
     _create_depth_stability_figure,
     _depth_stability_amplicon_order,
     _nested_subsample_means,
     compute_editing_rate_depth_stability,
-    compute_editing_rate_fixed_cell_depth_stability,
     write_editing_rate_depth_stability_plot,
-    write_editing_rate_fixed_cell_depth_stability_plot,
 )
 
 
@@ -131,195 +128,6 @@ def test_percentages_use_cohort_sizes_and_append_full_reference():
         "subsample_interval_upper_pct",
     ]
     assert duplicate_depth_rows[summary_columns].nunique().eq(1).all()
-
-
-def test_fixed_cell_counts_are_exact_and_small_cohorts_are_not_capped():
-    n_cells = 1_200
-    index = [f"cell{value:04d}" for value in range(n_cells)]
-    editing_summary = pd.DataFrame(
-        {
-            "totCount.ampA": np.repeat(10, n_cells),
-            "modPct.ampA": np.linspace(0.0, 100.0, n_cells),
-            "totCount.ampB": np.repeat(10, n_cells),
-            "modPct.ampB": np.linspace(100.0, 0.0, n_cells),
-        },
-        index=index,
-    )
-    quality_scores = pd.DataFrame(
-        {"Color": ["HQ_HI"] * 600 + ["LQ_HI"] * 600},
-        index=index,
-    )
-    config = EditingRateDepthStabilityConfig(iterations=100, seed=13)
-
-    result = compute_editing_rate_fixed_cell_depth_stability(
-        editing_summary,
-        quality_scores,
-        ["HQ_HI"],
-        min_reads_per_amplicon_per_cell=1,
-        config=config,
-    )
-
-    assert set(result["requested_sample_n_cells"]) == set(FIXED_CELL_COUNT_DEPTHS)
-    assert "sample_percent" not in result.columns
-    assert "is_full_reference" not in result.columns
-
-    all_rows = result.loc[
-        (result["amplicon"] == "ampA") & (result["cohort"] == "all")
-    ].set_index("requested_sample_n_cells")
-    assert all_rows["sample_n_cells"].tolist() == list(FIXED_CELL_COUNT_DEPTHS)
-    assert all_rows["status"].eq("ok").all()
-
-    hq_rows = result.loc[
-        (result["amplicon"] == "ampA") & (result["cohort"] == "hq")
-    ].set_index("requested_sample_n_cells")
-    assert hq_rows.loc[[100, 200, 400], "sample_n_cells"].tolist() == [100, 200, 400]
-    assert hq_rows.loc[[800, 1000], "sample_n_cells"].tolist() == [0, 0]
-    assert hq_rows.loc[[800, 1000], "status"].eq("insufficient_cells").all()
-    assert hq_rows.loc[[800, 1000], "subsample_median_pct"].isna().all()
-
-
-def test_fixed_cell_count_results_are_deterministic_in_parallel_and_plot_all_amplicons(
-    tmp_path,
-    monkeypatch,
-):
-    n_cells = 1_000
-    index = [f"cell{value:04d}" for value in range(n_cells)]
-    editing_summary = pd.DataFrame(
-        {
-            "totCount.ampA": np.repeat(10, n_cells),
-            "modPct.ampA": np.linspace(0.0, 100.0, n_cells),
-            "totCount.ampB": np.repeat(10, n_cells),
-            "modPct.ampB": np.linspace(100.0, 0.0, n_cells),
-        },
-        index=index,
-    )
-    quality_scores = pd.DataFrame(
-        {"Color": ["HQ_HI"] * 500 + ["LQ_HI"] * 500},
-        index=index,
-    )
-    kwargs = {
-        "editing_summary": editing_summary,
-        "quality_scores": quality_scores,
-        "high_quality_codes": ["HQ_HI"],
-        "min_reads_per_amplicon_per_cell": 1,
-        "config": EditingRateDepthStabilityConfig(iterations=100, seed=23),
-    }
-    serial = compute_editing_rate_fixed_cell_depth_stability(n_processes=1, **kwargs)
-    parallel = compute_editing_rate_fixed_cell_depth_stability(n_processes=2, **kwargs)
-    pdt.assert_frame_equal(serial, parallel)
-
-    captured_orders = []
-    original_create_figure = editing_rate_ci_module._create_depth_stability_figure
-
-    def record_order(*args, **kwargs):
-        captured_orders.append(list(args[1]))
-        return original_create_figure(*args, **kwargs)
-
-    monkeypatch.setattr(
-        editing_rate_ci_module,
-        "_create_depth_stability_figure",
-        record_order,
-    )
-    metadata = write_editing_rate_fixed_cell_depth_stability_plot(
-        serial,
-        str(tmp_path / "run"),
-    )
-    assert len(metadata) == 1
-    assert set(captured_orders[0]) == {"ampA", "ampB"}
-    fixed_plot = Path(
-        str(tmp_path / "run") + ".15_EditingRateFixedCellDepthStability.png"
-    )
-    assert fixed_plot.is_file()
-    write_editing_rate_fixed_cell_depth_stability_plot(
-        serial.iloc[0:0],
-        str(tmp_path / "run"),
-    )
-    assert not fixed_plot.exists()
-
-
-def test_relative_metrics_use_inclusive_hq_threshold_and_own_cohort_denominators():
-    editing_summary = pd.DataFrame(
-        {
-            "totCount.ampA": [10, 10, 10, 10],
-            "modPct.ampA": [0.0, 0.0, 2.0, 2.0],
-        },
-        index=["cell1", "cell2", "cell3", "cell4"],
-    )
-    quality_scores = pd.DataFrame(
-        {"Color": ["HQ_HI", "LQ_HI", "HQ_HI", "LQ_HI"]},
-        index=editing_summary.index,
-    )
-    results = compute_editing_rate_depth_stability(
-        editing_summary,
-        quality_scores,
-        ["HQ_HI"],
-        1,
-        EditingRateDepthStabilityConfig(
-            iterations=100,
-            percentages=(50.0,),
-            relative_min_hq_edit_pct=1.0,
-        ),
-    )
-
-    assert results["hq_full_estimate_pct"].eq(1.0).all()
-    assert results["relative_plot_eligible"].all()
-    nonreference = results.loc[results["sample_percent"] == 50.0]
-    source_to_relative = {
-        "median_deviation_pp": "median_relative_deviation_pct",
-        "deviation_interval_lower_pp": "relative_deviation_interval_lower_pct",
-        "deviation_interval_upper_pp": "relative_deviation_interval_upper_pct",
-        "median_abs_deviation_from_full_pp": "median_absolute_relative_deviation_pct",
-        "p95_abs_deviation_from_full_pp": "p95_absolute_relative_deviation_pct",
-    }
-    for source_column, relative_column in source_to_relative.items():
-        expected = (
-            100.0
-            * nonreference[source_column]
-            / nonreference["full_estimate_pct"]
-        )
-        np.testing.assert_allclose(nonreference[relative_column], expected)
-    references = results.loc[results["is_full_reference"]]
-    relative_columns = [
-        "median_relative_deviation_pct",
-        "relative_deviation_interval_lower_pct",
-        "relative_deviation_interval_upper_pct",
-        "median_absolute_relative_deviation_pct",
-        "p95_absolute_relative_deviation_pct",
-    ]
-    assert references[relative_columns].eq(0.0).all().all()
-
-
-def test_relative_metrics_are_na_below_hq_threshold_and_safe_for_zero_hq_rate():
-    editing_summary = pd.DataFrame(
-        {
-            "totCount.below": [10, 10, 10, 10],
-            "modPct.below": [0.0, 0.0, 1.0, 1.0],
-            "totCount.zero": [10, 10, 10, 10],
-            "modPct.zero": [0.0, 10.0, 0.0, 10.0],
-        },
-        index=["cell1", "cell2", "cell3", "cell4"],
-    )
-    quality_scores = pd.DataFrame(
-        {"Color": ["HQ_HI", "LQ_HI", "HQ_HI", "LQ_HI"]},
-        index=editing_summary.index,
-    )
-    results = compute_editing_rate_depth_stability(
-        editing_summary,
-        quality_scores,
-        ["HQ_HI"],
-        1,
-        EditingRateDepthStabilityConfig(
-            iterations=100,
-            percentages=(50.0,),
-            relative_min_hq_edit_pct=1.0,
-        ),
-    )
-
-    assert not results["relative_plot_eligible"].any()
-    relative_columns = [
-        column for column in results.columns if "relative_deviation" in column
-    ]
-    assert results[relative_columns].isna().all().all()
 
 
 def test_hq_ordering_takes_precedence_and_missing_hq_is_last():
@@ -493,19 +301,11 @@ def test_insufficient_cohorts_are_retained_but_not_plotted(tmp_path):
     hq_rows = results.loc[results["cohort"] == "hq"]
     assert hq_rows["status"].eq("insufficient_cells").all()
     assert hq_rows["subsample_median_pct"].isna().all()
-    assert not results["relative_plot_eligible"].any()
-    assert results["median_relative_deviation_pct"].isna().all()
 
     metadata = write_editing_rate_depth_stability_plot(results, str(tmp_path / "run"))
     assert len(metadata) == 1
     assert Path(str(tmp_path / "run") + ".12_EditingRateDepthStability.png").is_file()
     assert Path(str(tmp_path / "run") + ".12_EditingRateDepthStability.pdf").is_file()
-    assert not Path(
-        str(tmp_path / "run") + ".13_EditingRateRelativeDepthStability.png"
-    ).exists()
-    assert not Path(
-        str(tmp_path / "run") + ".13_EditingRateRelativeDepthStability.pdf"
-    ).exists()
 
 
 def test_stability_plots_filter_to_significant_amplicons_and_remove_stale_outputs(
@@ -539,6 +339,15 @@ def test_stability_plots_filter_to_significant_amplicons_and_remove_stale_output
         "_create_depth_stability_figure",
         record_amplicon_order,
     )
+    retired_paths = []
+    for suffix in (
+        ".13_EditingRateRelativeDepthStability",
+        ".15_EditingRateFixedCellDepthStability",
+    ):
+        for extension in (".png", ".pdf"):
+            path = Path(output_root + suffix + extension)
+            path.write_text("stale")
+            retired_paths.append(path)
 
     metadata = write_editing_rate_depth_stability_plot(
         results,
@@ -550,6 +359,7 @@ def test_stability_plots_filter_to_significant_amplicons_and_remove_stale_output
     assert plotted_orders
     assert all(order == ["ampA"] for order in plotted_orders)
     assert Path(output_root + ".12_EditingRateDepthStability.png").is_file()
+    assert all(not path.exists() for path in retired_paths)
 
     metadata = write_editing_rate_depth_stability_plot(
         results,

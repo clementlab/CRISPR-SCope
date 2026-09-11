@@ -198,11 +198,18 @@ Defaults and output
 * Every permuted InGroup mean:
   <output_root>.editingRateUnconditionalPermutationSimulations.txt
 * Plot: <output_root>.16_EditingRateUnconditionalPermutation.{png,pdf}
+* Observed-centered swarm:
+  <output_root>.17_EditingRateObservedCenteredPermutationSwarm.{png,pdf}
 
 The summary and boxplot use the exact permutation draws used to calculate the
 p-value; they are not produced by a second resampling procedure. The plot
 includes every estimable amplicon regardless of the coverage-controlled
 significance threshold.
+
+The observed-centered swarm is another view of the same draws. It plots each
+permuted InGroup-sized subset mean relative to the observed InGroup mean for
+its amplicon, in percentage points. Its vertical zero line identifies the
+observed InGroup editing rate for every amplicon.
 
 This test controls only the InGroup size. It does not control for
 per-amplicon read-depth differences between cohorts.
@@ -315,19 +322,16 @@ than repeatedly sampled.
 
 Defaults and output
 ~~~~~~~~~~~~~~~~~~~
+* Disabled by default; set write_editing_rate_depth_stability = True to run.
 * editing_rate_depth_stability_iterations = 1,000
 * editing_rate_depth_stability_percentages = 10,25,50,75,90
 * confidence level = 0.95; seed = 42 (shared with CI settings)
 * Table: <output_root>.editingRateDepthStability.txt
-* Absolute plot: <output_root>.12_EditingRateDepthStability.{png,pdf}
-* Relative plot: <output_root>.13_EditingRateRelativeDepthStability.{png,pdf}
+* Plot: <output_root>.12_EditingRateDepthStability.{png,pdf}
 
-The absolute and relative percentage-based plots are restricted to amplicons
-that meet the coverage-controlled BH threshold. Relative deviations are scaled
-by each cohort's full editing rate. To avoid unstable ratios near zero, an
-amplicon appears in the relative plot only when its full InGroup editing
-rate is at least editing_rate_depth_stability_relative_min_hq_edit_pct (default
-1%).
+The plot reports absolute percentage-point deviations and is restricted to
+amplicons that meet the coverage-controlled BH threshold. The complete table is
+retained even when no amplicon passes that threshold and the plot is omitted.
 
 Caveat
 ~~~~~~
@@ -336,45 +340,7 @@ biological samples. It samples without replacement and therefore differs from
 the bootstrap confidence-interval procedure above.
 
 
-8. Fixed-cell-count finite-cohort depth stability
---------------------------------------------------
-
-Goal
-~~~~
-Compare stability at identical absolute cell counts across amplicons and
-cohorts.
-
-Method
-~~~~~~
-For each amplicon and for both the AllCells and InGroup cohorts, the workflow
-repeats the finite-cohort sampling procedure WITHOUT REPLACEMENT at exactly:
-
-    100, 200, 400, 800, and 1,000 eligible cells
-
-Each replicate produces a mean and its percentage-point deviation from that
-cohort's full eligible-cohort mean. The table reports the median estimate,
-central interval, median absolute deviation, and 95th percentile absolute
-deviation across iterations.
-
-A requested size is used only when the cohort has at least that many eligible
-cells. Smaller cohorts are NOT capped to a smaller size and are NOT relabeled;
-they receive sample_n_cells = 0, status = insufficient_cells, and missing
-subsample statistics for that requested count.
-
-Defaults, output, and caveat
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-* Uses editing_rate_depth_stability_iterations = 1,000,
-  editing_rate_ci_confidence_level = 0.95, and editing_rate_ci_seed = 42.
-* Table: <output_root>.editingRateFixedCellDepthStability.txt
-* Plot: <output_root>.15_EditingRateFixedCellDepthStability.{png,pdf}
-
-Unlike the percentage-based plots, the fixed-count plot includes all amplicons
-with available results regardless of editing-rate significance. It remains a
-within-run, finite-cohort sensitivity analysis rather than biological
-replication.
-
-
-9. I/O, partial-result, and cache robustness
+8. I/O, partial-result, and cache robustness
 ---------------------------------------------
 
 CRISPResso FASTQ readers inspect the file's gzip magic bytes rather than
@@ -404,7 +370,7 @@ counts. Parser caches also record the ignore_substitutions setting so a change
 in substitution handling triggers reparsing.
 
 
-10. Recreating the workflow
+9. Recreating the workflow
 ----------------------------
 
 1. From first-pass CRISPResso-derived summaries, create a barcode-by-amplicon
@@ -421,10 +387,9 @@ in substitution handling triggers reparsing.
    Apply BH correction separately to the two families of permutation p-values.
 5. Store and summarize the same unconditional permutation draws used for its
    p-value, and plot their distribution with the observed InGroup mean.
-6. For depth stability, draw nested percentage samples and fixed-size samples
-   without replacement, summarize deviations from each cohort's full mean, and
-   preserve unavailable fixed counts as insufficient rather than changing the
-   requested size.
+6. When the optional depth-stability analysis is enabled, draw nested percentage
+   samples without replacement and summarize deviations from each cohort's full
+   mean.
 
 Reproducibility notes
 ~~~~~~~~~~~~~~~~~~~~~

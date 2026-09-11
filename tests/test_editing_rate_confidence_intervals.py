@@ -189,7 +189,7 @@ def test_missing_matching_count_column_is_rejected():
         )
 
 
-def test_plot_writer_creates_primary_and_delta_artifacts(tmp_path):
+def test_plot_writer_creates_primary_and_adjusted_effect_artifacts(tmp_path):
     editing_summary, quality_scores = _example_inputs()
     results = compute_editing_rate_confidence_intervals(
         editing_summary,
@@ -207,10 +207,9 @@ def test_plot_writer_creates_primary_and_delta_artifacts(tmp_path):
 
     metadata = write_editing_rate_ci_plots(results, str(tmp_path / "run"))
 
-    assert len(metadata) == 3
+    assert len(metadata) == 2
     for suffix in [
         ".10_EditingRateConfidenceIntervals",
-        ".11_EditingRateQualityDelta",
         ".14_EditingRateCoverageAdjustedEffects",
     ]:
         assert Path(str(tmp_path / "run") + suffix + ".png").is_file()
@@ -257,3 +256,23 @@ def test_plot_writer_skips_artifacts_when_no_amplicon_is_significant(tmp_path, c
         )
     )
     assert Path(str(tmp_path / "run") + ".14_EditingRateCoverageAdjustedEffects.png").is_file()
+
+
+def test_plot_writer_removes_retired_quality_delta_artifacts(tmp_path):
+    editing_summary, quality_scores = _example_inputs()
+    results = compute_editing_rate_confidence_intervals(
+        editing_summary,
+        quality_scores,
+        ["HQ_HI"],
+        1,
+        EditingRateCIConfig(enabled=True, bootstrap_iterations=200),
+        n_processes=1,
+    )
+    results.loc[:, "coverage_adjusted_bh_p_value"] = 0.01
+    stale = Path(str(tmp_path / "run") + ".11_EditingRateQualityDelta.png")
+    stale.write_text("stale")
+
+    metadata = write_editing_rate_ci_plots(results, str(tmp_path / "run"))
+
+    assert not stale.exists()
+    assert all(not item["plot_name"].endswith(".11_EditingRateQualityDelta") for item in metadata)

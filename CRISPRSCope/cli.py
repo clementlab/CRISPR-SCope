@@ -236,7 +236,7 @@ def _parse_editing_rate_depth_stability_config(settings_file):
 	enabled = _parse_bool_setting(
 		settings,
 		'write_editing_rate_depth_stability',
-		default=True,
+		default=False,
 	)
 	iterations = _parse_int_setting(
 		settings,
@@ -266,19 +266,6 @@ def _parse_editing_rate_depth_stability_config(settings_file):
 		raise ValueError(
 			"editing_rate_depth_stability_percentages must be strictly increasing and unique"
 		)
-	relative_min_hq_edit_pct = _parse_float_setting(
-		settings,
-		'editing_rate_depth_stability_relative_min_hq_edit_pct',
-		1.0,
-	)
-	if (
-		not np.isfinite(relative_min_hq_edit_pct)
-		or relative_min_hq_edit_pct <= 0
-		or relative_min_hq_edit_pct > 100
-	):
-		raise ValueError(
-			"editing_rate_depth_stability_relative_min_hq_edit_pct must be greater than 0 and no greater than 100"
-		)
 	confidence_level = _parse_float_setting(
 		settings,
 		'editing_rate_ci_confidence_level',
@@ -293,7 +280,6 @@ def _parse_editing_rate_depth_stability_config(settings_file):
 		percentages=percentages,
 		confidence_level=confidence_level,
 		seed=seed,
-		relative_min_hq_edit_pct=relative_min_hq_edit_pct,
 	)
 
 
@@ -2214,6 +2200,7 @@ def write_editing_rate_ci_output(
 		_significant_plot_rows,
 		compute_editing_rate_resampling_analyses,
 		write_editing_rate_ci_plots,
+		write_editing_rate_observed_centered_permutation_swarm_plot,
 		write_editing_rate_unconditional_permutation_plot,
 	)
 
@@ -2262,6 +2249,13 @@ def write_editing_rate_ci_output(
 			output_root,
 		)
 	)
+	plot_metadata.extend(
+		write_editing_rate_observed_centered_permutation_swarm_plot(
+			permutation_results,
+			permutation_simulations,
+			output_root,
+		)
+	)
 	plot_objects = [
 		PlotObject(
 			plot_name=metadata["plot_name"],
@@ -2272,7 +2266,12 @@ def write_editing_rate_ci_output(
 					("Unconditional permutation summary", permutation_output_path),
 					("Unconditional permutation simulations", permutation_simulations_output_path),
 				]
-				if metadata["plot_name"].endswith(".16_EditingRateUnconditionalPermutation")
+				if metadata["plot_name"].endswith(
+					(
+						".16_EditingRateUnconditionalPermutation",
+						".17_EditingRateObservedCenteredPermutationSwarm",
+					)
+				)
 				else [("Editing-rate confidence intervals", output_path)]
 			),
 		)
@@ -2293,15 +2292,12 @@ def write_editing_rate_depth_stability_output(
 	"""Compute, write, and plot first-pass editing-rate depth stability."""
 	from CRISPRSCope.editing_rate_ci import (
 		compute_editing_rate_depth_stability,
-		compute_editing_rate_fixed_cell_depth_stability,
 		write_editing_rate_depth_stability_plot,
-		write_editing_rate_fixed_cell_depth_stability_plot,
 	)
 
 	editing_summary_path = output_root + ".editingSummary.txt"
 	quality_scores_path = output_root + ".amplicon_score.txt"
 	output_path = output_root + ".editingRateDepthStability.txt"
-	fixed_output_path = output_root + ".editingRateFixedCellDepthStability.txt"
 	editing_summary = pd.read_csv(editing_summary_path, sep="\t", index_col=0)
 	quality_scores = pd.read_csv(quality_scores_path, sep="\t", index_col=0)
 	results = compute_editing_rate_depth_stability(
@@ -2315,36 +2311,12 @@ def write_editing_rate_depth_stability_output(
 	results.to_csv(output_path, sep="\t", index=False, na_rep="NA", float_format="%.6f")
 	logging.info("Wrote editing-rate depth stability table to %s", output_path)
 
-	fixed_results = compute_editing_rate_fixed_cell_depth_stability(
-		editing_summary=editing_summary,
-		quality_scores=quality_scores,
-		high_quality_codes=cell_quality_to_analyze,
-		min_reads_per_amplicon_per_cell=min_reads_per_amplicon_per_cell,
-		config=config,
-		n_processes=n_processes,
-	)
-	fixed_results.to_csv(
-		fixed_output_path,
-		sep="\t",
-		index=False,
-		na_rep="NA",
-		float_format="%.6f",
-	)
-	logging.info(
-		"Wrote fixed-cell-count editing-rate stability table to %s",
-		fixed_output_path,
-	)
-
 	plot_metadata = write_editing_rate_depth_stability_plot(
 		results,
 		output_root,
 		significant_amplicons=significant_amplicons,
 	)
-	fixed_plot_metadata = write_editing_rate_fixed_cell_depth_stability_plot(
-		fixed_results,
-		output_root,
-	)
-	plot_objects = [
+	return [
 		PlotObject(
 			plot_name=metadata["plot_name"],
 			plot_title=metadata["plot_title"],
@@ -2353,16 +2325,6 @@ def write_editing_rate_depth_stability_output(
 		)
 		for metadata in plot_metadata
 	]
-	plot_objects.extend(
-		PlotObject(
-			plot_name=metadata["plot_name"],
-			plot_title=metadata["plot_title"],
-			plot_label=metadata["plot_label"],
-			plot_datas=[("Fixed-cell-count editing-rate stability", fixed_output_path)],
-		)
-		for metadata in fixed_plot_metadata
-	)
-	return plot_objects
 
 
 def write_h5ad_output(output_root, settings_file, h5ad_output=None, h5ad_export_config=None, n_processes=None):

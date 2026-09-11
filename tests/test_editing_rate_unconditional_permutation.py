@@ -4,7 +4,10 @@ import pandas.testing as pdt
 
 from CRISPRSCope.editing_rate_ci import (
     EditingRateCIConfig,
+    _observed_centered_permutation_differences,
+    _observed_centered_swarm_coordinates,
     compute_editing_rate_resampling_analyses,
+    write_editing_rate_observed_centered_permutation_swarm_plot,
     write_editing_rate_unconditional_permutation_plot,
 )
 
@@ -129,3 +132,63 @@ def test_unconditional_distribution_is_deterministic_in_parallel_and_plots_all(t
     ) == []
     assert not (tmp_path / "run.16_EditingRateUnconditionalPermutation.png").exists()
     assert not (tmp_path / "run.16_EditingRateUnconditionalPermutation.pdf").exists()
+
+
+def test_observed_centered_permutation_differences_filter_and_center_draws():
+    summaries = pd.DataFrame(
+        {
+            "amplicon": ["ampA", "ampB"],
+            "selected_group_estimate_pct": [40.0, 60.0],
+            "valid_permutations": [2, 0],
+            "seed": [42, 42],
+        }
+    )
+    simulations = pd.DataFrame(
+        {
+            "amplicon": ["ampA", "ampA", "ampB"],
+            "permuted_selected_estimate_pct": [35.0, 45.0, 55.0],
+        }
+    )
+
+    centered = _observed_centered_permutation_differences(summaries, simulations)
+
+    assert centered["amplicon"].tolist() == ["ampA", "ampA"]
+    assert centered["observed_in_group_estimate_pct"].tolist() == [40.0, 40.0]
+    assert centered["simulated_minus_observed_pct"].tolist() == [-5.0, 5.0]
+
+
+def test_observed_centered_swarm_is_deterministic_and_writes_artifacts(tmp_path):
+    editing_summary, quality_scores = _input_data([100.0] * 10 + [0.0] * 10, 10)
+    _, summaries, simulations = _compute(editing_summary, quality_scores, seed=31)
+    centered = _observed_centered_permutation_differences(summaries, simulations)
+
+    first_coordinates, first_order = _observed_centered_swarm_coordinates(centered)
+    second_coordinates, second_order = _observed_centered_swarm_coordinates(centered)
+    pdt.assert_frame_equal(first_coordinates, second_coordinates)
+    pdt.assert_frame_equal(first_order, second_order)
+    assert first_coordinates["simulated_minus_observed_pct"].eq(
+        simulations["permuted_selected_estimate_pct"]
+        - summaries.iloc[0]["selected_group_estimate_pct"]
+    ).all()
+
+    metadata = write_editing_rate_observed_centered_permutation_swarm_plot(
+        summaries, simulations, str(tmp_path / "run")
+    )
+    assert len(metadata) == 1
+    assert (tmp_path / "run.17_EditingRateObservedCenteredPermutationSwarm.png").is_file()
+    assert (tmp_path / "run.17_EditingRateObservedCenteredPermutationSwarm.pdf").is_file()
+
+
+def test_observed_centered_swarm_orders_by_largest_mean_relative_effect():
+    centered = pd.DataFrame(
+        {
+            "amplicon": ["ampA", "ampA", "ampB", "ampB", "ampC", "ampC"],
+            "observed_in_group_estimate_pct": [50.0] * 6,
+            "simulated_minus_observed_pct": [1.0, 3.0, 2.0, 2.0, -1.0, -3.0],
+            "seed": [42] * 6,
+        }
+    )
+
+    _, order = _observed_centered_swarm_coordinates(centered)
+
+    assert order["amplicon"].tolist() == ["ampA", "ampB", "ampC"]
