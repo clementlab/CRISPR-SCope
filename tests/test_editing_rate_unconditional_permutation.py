@@ -123,15 +123,15 @@ def test_unconditional_distribution_is_deterministic_in_parallel_and_plots_all(t
         serial[1], serial[2], str(tmp_path / "run")
     )
     assert len(metadata) == 1
-    assert (tmp_path / "run.16_EditingRateUnconditionalPermutation.png").is_file()
-    assert (tmp_path / "run.16_EditingRateUnconditionalPermutation.pdf").is_file()
+    assert (tmp_path / "run.12_EditingRateUnconditionalPermutation.png").is_file()
+    assert (tmp_path / "run.12_EditingRateUnconditionalPermutation.pdf").is_file()
     assert set(serial[1]["amplicon"]) == {"ampA", "ampB"}
 
     assert write_editing_rate_unconditional_permutation_plot(
         serial[1].iloc[0:0], serial[2].iloc[0:0], str(tmp_path / "run")
     ) == []
-    assert not (tmp_path / "run.16_EditingRateUnconditionalPermutation.png").exists()
-    assert not (tmp_path / "run.16_EditingRateUnconditionalPermutation.pdf").exists()
+    assert not (tmp_path / "run.12_EditingRateUnconditionalPermutation.png").exists()
+    assert not (tmp_path / "run.12_EditingRateUnconditionalPermutation.pdf").exists()
 
 
 def test_observed_centered_permutation_differences_filter_and_center_draws():
@@ -175,8 +175,8 @@ def test_observed_centered_swarm_is_deterministic_and_writes_artifacts(tmp_path)
         summaries, simulations, str(tmp_path / "run")
     )
     assert len(metadata) == 1
-    assert (tmp_path / "run.17_EditingRateObservedCenteredPermutationSwarm.png").is_file()
-    assert (tmp_path / "run.17_EditingRateObservedCenteredPermutationSwarm.pdf").is_file()
+    assert (tmp_path / "run.13_EditingRateObservedCenteredPermutationSwarm.png").is_file()
+    assert (tmp_path / "run.13_EditingRateObservedCenteredPermutationSwarm.pdf").is_file()
 
 
 def test_observed_centered_swarm_orders_by_largest_mean_relative_effect():

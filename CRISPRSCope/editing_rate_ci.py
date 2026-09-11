@@ -118,21 +118,26 @@ UNCONDITIONAL_PERMUTATION_SIMULATION_COLUMNS = [
 
 CI_PLOT_SUFFIXES = (
     ".10_EditingRateConfidenceIntervals",
-    ".14_EditingRateCoverageAdjustedEffects",
-    ".16_EditingRateUnconditionalPermutation",
-    ".17_EditingRateObservedCenteredPermutationSwarm",
+    ".11_EditingRateCoverageAdjustedEffects",
+    ".12_EditingRateUnconditionalPermutation",
+    ".13_EditingRateObservedCenteredPermutationSwarm",
 )
 
 DEPTH_STABILITY_PLOT_SUFFIXES = (
-    ".12_EditingRateDepthStability",
+    ".14_EditingRateDepthStability",
 )
 
 # Remove plots produced by earlier feature-branch versions so reruns cannot
 # leave stale figures linked or mistaken for current output.
 RETIRED_EDITING_RATE_PLOT_SUFFIXES = (
     ".11_EditingRateQualityDelta",
+    ".12_EditingRateDepthStability",
     ".13_EditingRateRelativeDepthStability",
+    ".14_EditingRateCoverageAdjustedEffects",
     ".15_EditingRateFixedCellDepthStability",
+    ".16_EditingRateUnconditionalPermutation",
+    ".17_EditingRateObservedCenteredPermutationSwarm",
+    ".18_EditingRateDepthStability",
 )
 
 
@@ -1370,7 +1375,7 @@ def _write_coverage_adjusted_effect_plot(
         ax.set_xlim(*interval_limits)
     ax.grid(axis="x", alpha=0.25)
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
-    plot_root = output_root + ".14_EditingRateCoverageAdjustedEffects"
+    plot_root = output_root + ".11_EditingRateCoverageAdjustedEffects"
     fig.savefig(plot_root + ".pdf", bbox_inches="tight")
     fig.savefig(plot_root + ".png", bbox_inches="tight")
     plt.close(fig)
@@ -1394,7 +1399,7 @@ def write_editing_rate_unconditional_permutation_plot(
     output_root: str,
 ) -> List[Dict[str, str]]:
     """Plot unconditional permutation distributions with selected-group estimates."""
-    suffix = ".16_EditingRateUnconditionalPermutation"
+    suffix = ".12_EditingRateUnconditionalPermutation"
     _remove_plot_artifacts(output_root, (suffix,))
     if summaries.empty or simulations.empty:
         return []
@@ -1592,7 +1597,7 @@ def write_editing_rate_observed_centered_permutation_swarm_plot(
     output_root: str,
 ) -> List[Dict[str, str]]:
     """Plot unconditional draws as differences from observed InGroup means."""
-    suffix = ".17_EditingRateObservedCenteredPermutationSwarm"
+    suffix = ".13_EditingRateObservedCenteredPermutationSwarm"
     _remove_plot_artifacts(output_root, (suffix,))
     centered = _observed_centered_permutation_differences(summaries, simulations)
     if centered.empty:
@@ -1992,7 +1997,7 @@ def write_editing_rate_depth_stability_plot(
         title="Editing-Rate Stability Across Cell-Depth Downsampling",
         y_label="Deviation from full-cohort editing rate (percentage points)",
     )
-    absolute_plot_root = output_root + ".12_EditingRateDepthStability"
+    absolute_plot_root = output_root + ".14_EditingRateDepthStability"
     _save_depth_stability_figure(absolute_figure, absolute_plot_root)
     significance_clause = (
         " among amplicons with a coverage-adjusted BH p-value at or below 0.05"

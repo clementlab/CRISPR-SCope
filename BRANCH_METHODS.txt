@@ -197,9 +197,9 @@ Defaults and output
 * Summary: <output_root>.editingRateUnconditionalPermutation.txt
 * Every permuted InGroup mean:
   <output_root>.editingRateUnconditionalPermutationSimulations.txt
-* Plot: <output_root>.16_EditingRateUnconditionalPermutation.{png,pdf}
+* Plot: <output_root>.12_EditingRateUnconditionalPermutation.{png,pdf}
 * Observed-centered swarm:
-  <output_root>.17_EditingRateObservedCenteredPermutationSwarm.{png,pdf}
+  <output_root>.13_EditingRateObservedCenteredPermutationSwarm.{png,pdf}
 
 The summary and boxplot use the exact permutation draws used to calculate the
 p-value; they are not produced by a second resampling procedure. The plot
@@ -327,7 +327,7 @@ Defaults and output
 * editing_rate_depth_stability_percentages = 10,25,50,75,90
 * confidence level = 0.95; seed = 42 (shared with CI settings)
 * Table: <output_root>.editingRateDepthStability.txt
-* Plot: <output_root>.12_EditingRateDepthStability.{png,pdf}
+* Plot: <output_root>.14_EditingRateDepthStability.{png,pdf}
 
 The plot reports absolute percentage-point deviations and is restricted to
 amplicons that meet the coverage-controlled BH threshold. The complete table is

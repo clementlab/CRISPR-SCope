@@ -210,7 +210,7 @@ def test_plot_writer_creates_primary_and_adjusted_effect_artifacts(tmp_path):
     assert len(metadata) == 2
     for suffix in [
         ".10_EditingRateConfidenceIntervals",
-        ".14_EditingRateCoverageAdjustedEffects",
+        ".11_EditingRateCoverageAdjustedEffects",
     ]:
         assert Path(str(tmp_path / "run") + suffix + ".png").is_file()
         assert Path(str(tmp_path / "run") + suffix + ".pdf").is_file()
@@ -236,7 +236,7 @@ def test_plot_writer_skips_artifacts_when_no_amplicon_is_significant(tmp_path, c
     for suffix in [
         ".10_EditingRateConfidenceIntervals",
         ".11_EditingRateQualityDelta",
-        ".14_EditingRateCoverageAdjustedEffects",
+        ".11_EditingRateCoverageAdjustedEffects",
     ]:
         for extension in [".png", ".pdf"]:
             path = Path(str(tmp_path / "run") + suffix + extension)
@@ -246,16 +246,16 @@ def test_plot_writer_skips_artifacts_when_no_amplicon_is_significant(tmp_path, c
     metadata = write_editing_rate_ci_plots(results, str(tmp_path / "run"))
 
     assert len(metadata) == 1
-    assert metadata[0]["plot_name"].endswith(".14_EditingRateCoverageAdjustedEffects")
+    assert metadata[0]["plot_name"].endswith(".11_EditingRateCoverageAdjustedEffects")
     assert "No amplicons passed the coverage-adjusted" in caplog.text
     assert all(
         not path.exists()
         for path in stale_paths
         if not str(path).endswith(
-            (".14_EditingRateCoverageAdjustedEffects.png", ".14_EditingRateCoverageAdjustedEffects.pdf")
+            (".11_EditingRateCoverageAdjustedEffects.png", ".11_EditingRateCoverageAdjustedEffects.pdf")
         )
     )
-    assert Path(str(tmp_path / "run") + ".14_EditingRateCoverageAdjustedEffects.png").is_file()
+    assert Path(str(tmp_path / "run") + ".11_EditingRateCoverageAdjustedEffects.png").is_file()
 
 
 def test_plot_writer_removes_retired_quality_delta_artifacts(tmp_path):

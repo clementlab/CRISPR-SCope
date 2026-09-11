@@ -304,8 +304,8 @@ def test_insufficient_cohorts_are_retained_but_not_plotted(tmp_path):
 
     metadata = write_editing_rate_depth_stability_plot(results, str(tmp_path / "run"))
     assert len(metadata) == 1
-    assert Path(str(tmp_path / "run") + ".12_EditingRateDepthStability.png").is_file()
-    assert Path(str(tmp_path / "run") + ".12_EditingRateDepthStability.pdf").is_file()
+    assert Path(str(tmp_path / "run") + ".14_EditingRateDepthStability.png").is_file()
+    assert Path(str(tmp_path / "run") + ".14_EditingRateDepthStability.pdf").is_file()
 
 
 def test_stability_plots_filter_to_significant_amplicons_and_remove_stale_outputs(
@@ -358,7 +358,7 @@ def test_stability_plots_filter_to_significant_amplicons_and_remove_stale_output
     assert metadata
     assert plotted_orders
     assert all(order == ["ampA"] for order in plotted_orders)
-    assert Path(output_root + ".12_EditingRateDepthStability.png").is_file()
+    assert Path(output_root + ".14_EditingRateDepthStability.png").is_file()
     assert all(not path.exists() for path in retired_paths)
 
     metadata = write_editing_rate_depth_stability_plot(
@@ -371,6 +371,7 @@ def test_stability_plots_filter_to_significant_amplicons_and_remove_stale_output
     assert "No significant amplicons" in caplog.text
     for suffix in [
         ".12_EditingRateDepthStability",
+        ".14_EditingRateDepthStability",
         ".13_EditingRateRelativeDepthStability",
         ".15_EditingRateFixedCellDepthStability",
     ]:

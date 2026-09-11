@@ -2268,8 +2268,8 @@ def write_editing_rate_ci_output(
 				]
 				if metadata["plot_name"].endswith(
 					(
-						".16_EditingRateUnconditionalPermutation",
-						".17_EditingRateObservedCenteredPermutationSwarm",
+						".12_EditingRateUnconditionalPermutation",
+						".13_EditingRateObservedCenteredPermutationSwarm",
 					)
 				)
 				else [("Editing-rate confidence intervals", output_path)]

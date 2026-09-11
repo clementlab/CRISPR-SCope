@@ -255,7 +255,7 @@ You may also use `genome` instead of `bowtie2_index`; internally the pipeline re
 | `editing_rate_ci_seed` | `42` | Non-negative base seed used for reproducible per-amplicon resampling. |
 | `editing_rate_ci_coverage_exact_max_reads` | `10` | Highest per-amplicon read count kept as an exact coverage stratum for the coverage-controlled test; must be non-negative. |
 | `editing_rate_ci_coverage_bin_width_reads` | `5` | Width of coverage strata above the exact-count ceiling; must be at least 1. With the defaults, the first binned strata are 11–15, 16–20, and 21–25 reads. |
-| `write_editing_rate_depth_stability` | `False` | Enables the optional finite-cohort downsampling table and detailed plot 12 for AllCells and InGroup. |
+| `write_editing_rate_depth_stability` | `False` | Enables the optional finite-cohort downsampling table and detailed plot 14 for AllCells and InGroup. |
 | `editing_rate_depth_stability_iterations` | `1000` | Number of without-replacement subsamples at each retained-cell percentage; must be at least 100. |
 | `editing_rate_depth_stability_percentages` | `10,25,50,75,90` | Strictly increasing, unique retained-cell percentages between 0 and 100; an exact 100% reference is added automatically. |
 | `write_h5ad` | `True` | Enables `.h5ad` export after the main run. |
@@ -297,9 +297,9 @@ The output reports estimates for each amplicon from:
 - the InGroup-minus-AllCells and InGroup-minus-OutGroup differences
 - a coverage-controlled InGroup-minus-OutGroup difference
 
-For each amplicon, CRISPRSCope first permutes InGroup labels among AllCells without replacement while preserving the observed InGroup size. This unconditional two-sided test asks whether the InGroup behaves differently from a random same-sized subset. The exact permutation draws used for the p-value are also written to `.editingRateUnconditionalPermutationSimulations.txt`, summarized in `.editingRateUnconditionalPermutation.txt`, and shown in `.16_EditingRateUnconditionalPermutation.{png,pdf}` for every estimable amplicon.
+For each amplicon, CRISPRSCope first permutes InGroup labels among AllCells without replacement while preserving the observed InGroup size. This unconditional two-sided test asks whether the InGroup behaves differently from a random same-sized subset. The exact permutation draws used for the p-value are also written to `.editingRateUnconditionalPermutationSimulations.txt`, summarized in `.editingRateUnconditionalPermutation.txt`, and shown in `.12_EditingRateUnconditionalPermutation.{png,pdf}` for every estimable amplicon.
 
-The same draws are also shown in `.17_EditingRateObservedCenteredPermutationSwarm.{png,pdf}`. Each point is a simulated InGroup-sized subset mean shown relative to that amplicon's observed InGroup mean, in percentage points; the dashed zero line marks the observed editing rate. This is a second view of the existing simulation output, not an additional resampling procedure.
+The same draws are also shown in `.13_EditingRateObservedCenteredPermutationSwarm.{png,pdf}`. Each point is a simulated InGroup-sized subset mean shown relative to that amplicon's observed InGroup mean, in percentage points; the dashed zero line marks the observed editing rate. This is a second view of the existing simulation output, not an additional resampling procedure.
 
 The coverage-controlled follow-up runs for every testable amplicon. Read counts through `editing_rate_ci_coverage_exact_max_reads` define exact strata; higher counts are grouped into consecutive bins of `editing_rate_ci_coverage_bin_width_reads`. Labels are permuted only within strata containing both InGroup and OutGroup cells. The adjusted effect is an information-weighted average of the within-stratum InGroup-minus-OutGroup differences. Cells in single-cohort coverage strata remain in the unconditional estimates but cannot contribute to the controlled effect; common-support counts and retained percentages are reported explicitly. The table also reports common-depth standardized InGroup and OutGroup means using the same normalized overlap weights; their difference equals the coverage-adjusted effect. A separate within-stratum bootstrap supplies the adjusted effect's confidence interval.
 
@@ -313,7 +313,7 @@ Set `write_editing_rate_depth_stability` to `True` to request this optional deta
 
 Within each iteration, the percentage levels are nested: one random ordering of eligible cells supplies the first 10%, 25%, 50%, 75%, and 90%. The output reports the median editing rate, a central interval controlled by `editing_rate_ci_confidence_level`, and absolute deviations from the full-cohort estimate. An exact 100% reference is appended automatically. Random sampling uses `editing_rate_ci_seed`, making identical inputs and settings reproducible across serial and parallel runs.
 
-Plot 12 reports percentage-point deviations for coverage-controlled significant amplicons with a usable cohort and orders them by the full InGroup editing rate, highest first. If no amplicon passes the coverage-controlled threshold, the table is retained and plot 12 is omitted.
+Plot 14 reports percentage-point deviations for coverage-controlled significant amplicons with a usable cohort and orders them by the full InGroup editing rate, highest first. If no amplicon passes the coverage-controlled threshold, the table is retained and plot 14 is omitted.
 
 The stability bands answer how much the inferred editing rate changes as cells from this run are retained or removed. They are finite-cohort downsampling diagnostics, not confidence intervals across biological replicates.
 
@@ -345,9 +345,9 @@ results/demo_run.editingRateConfidenceIntervals.txt
 results/demo_run.editingRateUnconditionalPermutation.txt
 results/demo_run.editingRateUnconditionalPermutationSimulations.txt
 results/demo_run.10_EditingRateConfidenceIntervals.{png,pdf}
-results/demo_run.14_EditingRateCoverageAdjustedEffects.{png,pdf}
-results/demo_run.16_EditingRateUnconditionalPermutation.{png,pdf}
-results/demo_run.17_EditingRateObservedCenteredPermutationSwarm.{png,pdf}
+results/demo_run.11_EditingRateCoverageAdjustedEffects.{png,pdf}
+results/demo_run.12_EditingRateUnconditionalPermutation.{png,pdf}
+results/demo_run.13_EditingRateObservedCenteredPermutationSwarm.{png,pdf}
 results/demo_run.h5ad
 ```
 
@@ -355,7 +355,7 @@ When `write_editing_rate_depth_stability=True`, the additional detailed outputs 
 
 ```text
 results/demo_run.editingRateDepthStability.txt
-results/demo_run.12_EditingRateDepthStability.{png,pdf}
+results/demo_run.14_EditingRateDepthStability.{png,pdf}
 ```
 
 The exact set of plot PDFs, PNGs, and intermediate files depends on settings and on whether intermediate files are retained.

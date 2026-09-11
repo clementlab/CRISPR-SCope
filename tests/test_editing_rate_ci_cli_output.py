@@ -65,7 +65,7 @@ def test_cli_writer_creates_table_plots_and_report_links(tmp_path):
     assert len(plot_objects) == 4
     permutation_plot = next(
         plot for plot in plot_objects
-        if plot.name.endswith(".16_EditingRateUnconditionalPermutation")
+        if plot.name.endswith(".12_EditingRateUnconditionalPermutation")
     )
     assert permutation_plot.datas == [
         ("Unconditional permutation summary", str(tmp_path / "run.editingRateUnconditionalPermutation.txt")),
@@ -73,7 +73,7 @@ def test_cli_writer_creates_table_plots_and_report_links(tmp_path):
     ]
     observed_centered_plot = next(
         plot for plot in plot_objects
-        if plot.name.endswith(".17_EditingRateObservedCenteredPermutationSwarm")
+        if plot.name.endswith(".13_EditingRateObservedCenteredPermutationSwarm")
     )
     assert observed_centered_plot.datas == permutation_plot.datas
     assert all(
@@ -130,18 +130,18 @@ def test_cli_writer_keeps_table_and_comparison_plot_without_significance(tmp_pat
     assert pd.read_csv(table_path, sep="\t")["amplicon"].tolist() == ["ampA"]
     assert significant_amplicons == []
     assert len(plot_objects) == 3
-    assert any(plot.name.endswith(".14_EditingRateCoverageAdjustedEffects") for plot in plot_objects)
+    assert any(plot.name.endswith(".11_EditingRateCoverageAdjustedEffects") for plot in plot_objects)
     assert any(
-        plot.name.endswith(".16_EditingRateUnconditionalPermutation")
+        plot.name.endswith(".12_EditingRateUnconditionalPermutation")
         for plot in plot_objects
     )
     assert any(
-        plot.name.endswith(".17_EditingRateObservedCenteredPermutationSwarm")
+        plot.name.endswith(".13_EditingRateObservedCenteredPermutationSwarm")
         for plot in plot_objects
     )
     assert not list(tmp_path.glob("run.10_EditingRateConfidenceIntervals.*"))
     assert not list(tmp_path.glob("run.11_EditingRateQualityDelta.*"))
-    assert (tmp_path / "run.14_EditingRateCoverageAdjustedEffects.png").is_file()
+    assert (tmp_path / "run.11_EditingRateCoverageAdjustedEffects.png").is_file()
 def test_depth_stability_writer_creates_table_plot_and_report_link(tmp_path):
     output_root = str(tmp_path / "run")
     editing_summary = pd.DataFrame(
@@ -173,8 +173,8 @@ def test_depth_stability_writer_creates_table_plot_and_report_link(tmp_path):
 
     table_path = tmp_path / "run.editingRateDepthStability.txt"
     assert table_path.is_file()
-    assert (tmp_path / "run.12_EditingRateDepthStability.png").is_file()
-    assert (tmp_path / "run.12_EditingRateDepthStability.pdf").is_file()
+    assert (tmp_path / "run.14_EditingRateDepthStability.png").is_file()
+    assert (tmp_path / "run.14_EditingRateDepthStability.pdf").is_file()
     assert not list(tmp_path.glob("run.13_EditingRateRelativeDepthStability.*"))
     assert not list(tmp_path.glob("run.15_EditingRateFixedCellDepthStability.*"))
     assert not (tmp_path / "run.editingRateFixedCellDepthStability.txt").exists()
@@ -203,7 +203,7 @@ def test_depth_stability_writer_creates_table_plot_and_report_link(tmp_path):
     assert "Editing-rate stability at fixed cell counts" not in report_text
 
 
-def test_cli_writer_keeps_table_but_omits_report_plots_without_significance(tmp_path):
+def test_cli_writer_keeps_table_and_comparison_plot_without_significance(tmp_path):
     output_root = str(tmp_path / "run")
     index = [f"cell{i}" for i in range(8)]
     pd.DataFrame(
@@ -215,7 +215,7 @@ def test_cli_writer_keeps_table_but_omits_report_plots_without_significance(tmp_
         index=index,
     ).to_csv(output_root + ".amplicon_score.txt", sep="\t")
 
-    plot_objects = cli.write_editing_rate_ci_output(
+    plot_objects, significant_amplicons = cli.write_editing_rate_ci_output(
         output_root=output_root,
         cell_quality_to_analyze=["HQ_HI"],
         min_reads_per_amplicon_per_cell=1,
@@ -230,6 +230,20 @@ def test_cli_writer_keeps_table_but_omits_report_plots_without_significance(tmp_
     table_path = tmp_path / "run.editingRateConfidenceIntervals.txt"
     assert table_path.is_file()
     assert pd.read_csv(table_path, sep="\t")["amplicon"].tolist() == ["ampA"]
-    assert plot_objects == []
+    assert significant_amplicons == []
+    assert len(plot_objects) == 3
+    assert any(
+        plot.name.endswith(".11_EditingRateCoverageAdjustedEffects")
+        for plot in plot_objects
+    )
+    assert any(
+        plot.name.endswith(".12_EditingRateUnconditionalPermutation")
+        for plot in plot_objects
+    )
+    assert any(
+        plot.name.endswith(".13_EditingRateObservedCenteredPermutationSwarm")
+        for plot in plot_objects
+    )
     assert not list(tmp_path.glob("run.10_EditingRateConfidenceIntervals.*"))
     assert not list(tmp_path.glob("run.11_EditingRateQualityDelta.*"))
+    assert (tmp_path / "run.11_EditingRateCoverageAdjustedEffects.png").is_file()
