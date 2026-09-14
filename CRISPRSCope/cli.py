@@ -34,6 +34,10 @@ import random
 import dnaio
 from CRISPRSCope import __version__
 from CRISPRSCope.io_utils import open_text_maybe_gzip
+from CRISPRSCope.output_artifacts import OutputContext, OutputManifest
+
+
+_ACTIVE_OUTPUT_MANIFEST = None
 
 # Constants and default settings
 MIN_TOTAL_READS_PER_BARCODE_DEFAULT = 10
@@ -700,7 +704,7 @@ def _require_selected_barcodes(parsed_information, cell_quality_to_analyze):
 	return selected_barcode_count
 
 
-def main():
+def _main_impl():
 	"""
 	Top-level pipeline entry point for the CRISPRSCope processing workflow.
 
@@ -735,7 +739,7 @@ def main():
 		min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze,
 		write_h5ad, h5ad_output, h5ad_export_config, debug_rescued_reads_bam,
 		debug_rejected_rescue_reads_bam, debug_require_strict_amplicon_alignment,
-		partial_rescue_min_mean_read_quality, settings_file
+		partial_rescue_min_mean_read_quality, write_output_manifest, settings_file
 		) = parse_settings(sys.argv)
 	amplicon_score_config = _parse_amplicon_score_config(settings_file)
 	editing_rate_ci_config = _parse_editing_rate_ci_config(settings_file)
@@ -744,13 +748,37 @@ def main():
 	#print(f"Parse Settings: {end_settings}")
 
 	output_root = validate_output_root(output_root)
-	
+	outputs = OutputContext(output_root, h5ad_output=h5ad_output)
+	global _ACTIVE_OUTPUT_MANIFEST
+	manifest = OutputManifest(outputs) if write_output_manifest else None
+	_ACTIVE_OUTPUT_MANIFEST = manifest
+
+	def record_plot(key, plot_object, reason="plot requirements were not met"):
+		if manifest is None:
+			return
+		if plot_object is None:
+			manifest.mark_skipped(key, reason)
+		else:
+			manifest.mark_written(key)
+
+	def remove_optional_artifacts(keys, reason="stale output from an earlier run"):
+		removed = set(outputs.remove(keys))
+		if manifest is None:
+			return
+		for key in keys:
+			if any(path in removed for path in outputs.paths(key)):
+				manifest.mark_removed_stale(key, reason)
+
+	if manifest is not None:
+		manifest.set_stage("parse_and_align_reads")
 	start_parse_and_align = time.time() 
 	aligned_bam, reads_per_cell = parse_and_align_reads(r1,r2,constant1,constant2,output_root,barcode_file,allow_barcode_mismatches,adapter_DNA,bowtie2_index,n_processes,keep_intermediate_files)
 	end_parse_and_align = time.time() - start_parse_and_align
 	logging.info(f"Parse and Align Reads: {end_parse_and_align}")
 
 
+	if manifest is not None:
+		manifest.set_stage("split_reads_by_amplicon")
 	start_split_reads = time.time()
 	amplicon_names, amplicon_information, amplicon_info_file = split_reads_by_amplicon(aligned_bam, output_root, amplicon_file, alt_alleles_file, primer_lookup_len, amp_file_dir, bowtie2_index, adapter_DNA, n_processes, keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons, debug_rescued_reads_bam, debug_require_strict_amplicon_alignment, debug_rejected_rescue_reads_bam, partial_rescue_min_mean_read_quality)
 	end_split_reads = time.time() - start_split_reads
@@ -758,11 +786,15 @@ def main():
 	
 #    print(f"Line266\n{amplicon_names=}\n{amplicon_information=}\n{amplicon_info_file=}")
 
+	if manifest is not None:
+		manifest.set_stage("run_crispresso")
 	start_crispresso = time.time()
 	crispresso_information = run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles = False)
 	end_crispresso = time.time() - start_crispresso
 	logging.info(f"Run CRISPResso: {end_crispresso}")
 
+	if manifest is not None:
+		manifest.set_stage("parse_crispresso_outputs")
 	start_parse_crispresso = time.time()
 	parsed_information = parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_file,
 											  crispresso_information,output_root, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell,
@@ -772,17 +804,23 @@ def main():
 	end_parse_crispresso = time.time() - start_parse_crispresso
 	logging.info(f"Parse CRISPResso Outputs: {end_parse_crispresso}")
 
+	if manifest is not None:
+		manifest.set_stage("filter_amplicon_reads")
 	start_filter_amplicon = time.time()
 	_require_selected_barcodes(parsed_information, cell_quality_to_analyze)
 	filter_amplicon_reads(output_root, parsed_information, amplicon_names, cell_quality_to_analyze, n_processes)
 	end_filter_amplicon = time.time() - start_filter_amplicon
 	logging.info(f"Filter Amplicon Reads: {end_filter_amplicon}")
 	
+	if manifest is not None:
+		manifest.set_stage("run_filtered_crispresso")
 	start_run_crispresso2 = time.time()
 	crispresso_filtered_information = run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles = True)
 	end_run_crispresso2 = time.time() - start_run_crispresso2
 	logging.info(f"Run CRISPResso 2: {end_run_crispresso2}")
 
+	if manifest is not None:
+		manifest.set_stage("write_filtered_editing_summary")
 	start_filtered_summary = time.time()
 	filtered_parsed_information = write_filtered_editing_summary_from_filtered_crispresso(
 		amplicon_names=amplicon_names,
@@ -794,58 +832,79 @@ def main():
 	end_filtered_summary = time.time() - start_filtered_summary
 	logging.info(f"Write Filtered Editing Summary: {end_filtered_summary}")
 
+	if manifest is not None:
+		manifest.set_stage("generate_summary_plots")
 	filtered_summary_plot_objects = []
 
 	filtered_read_count_plot_obj = generate_read_depth_boxplots(output_root, cell_quality_to_analyze)
+	record_plot("cell_coverage_boxplot", filtered_read_count_plot_obj)
 	if filtered_read_count_plot_obj is not None:
 		filtered_summary_plot_objects.append(filtered_read_count_plot_obj)
 
 	# Cell Coverage Bar Chart
 	filtered_cell_cov_plot_obj = generate_cell_coverage_plot(output_root, cell_quality_to_analyze)
+	record_plot("cell_coverage_plot", filtered_cell_cov_plot_obj)
 	if filtered_cell_cov_plot_obj is not None:
 		filtered_summary_plot_objects.append(filtered_cell_cov_plot_obj)
 
 	# Avg Read Count Per Amplicon Boxplot
 	filtered_amp_cov_plot_obj = generate_amplicon_coverage_plot(output_root, cell_quality_to_analyze)
+	record_plot("amplicon_coverage_plot", filtered_amp_cov_plot_obj)
 	if filtered_amp_cov_plot_obj is not None:
 		filtered_summary_plot_objects.append(filtered_amp_cov_plot_obj)
 
 	# Upset plot displaying edit site combinations
 	filtered_upset_plot_obj = generate_upset_plot(output_root, cell_quality_to_analyze)
+	record_plot("edit_combinations_plot", filtered_upset_plot_obj)
 	if filtered_upset_plot_obj is not None:
 		filtered_summary_plot_objects.append(filtered_upset_plot_obj)
 
 	# Histogram displaying the frequency of edited site number
 	filtered_hist_plot_obj = generate_edit_histogram(output_root, cell_quality_to_analyze)
+	record_plot("edit_histogram_plot", filtered_hist_plot_obj)
 	if filtered_hist_plot_obj is not None:
 		filtered_summary_plot_objects.append(filtered_hist_plot_obj)
 
 	# Generate a log read count (y) vs log barcode rank (x) colored by cell quality category
 	filtered_log_log_plot_obj = log_log_plot(parsed_information, output_root, cell_quality_to_analyze, filtered = False)
+	record_plot("log_log_plot", filtered_log_log_plot_obj)
 	if filtered_log_log_plot_obj is not None:
 		filtered_summary_plot_objects.append(filtered_log_log_plot_obj)
 
 	#
 	filtered_cell_per_amp_obj = cell_per_amp_filtered(filtered_parsed_information, output_root, cell_quality_to_analyze)
+	record_plot("cell_count_per_amplicon_plot", filtered_cell_per_amp_obj)
 	if filtered_cell_per_amp_obj is not None:
 		filtered_summary_plot_objects.append(filtered_cell_per_amp_obj)
 
 	#
 	filtered_amp_per_cell_obj = amp_per_cell_filtered(filtered_parsed_information, output_root, cell_quality_to_analyze)
+	record_plot("amplicon_covered_per_cell_plot", filtered_amp_per_cell_obj)
 	if filtered_amp_per_cell_obj is not None:
 		filtered_summary_plot_objects.append(filtered_amp_per_cell_obj)
 
 	#
 	filtered_mod_pct_plot_obj = mod_per_amp_filtered(filtered_parsed_information, output_root, cell_quality_to_analyze)
+	record_plot("modification_percentage_plot", filtered_mod_pct_plot_obj)
 	if filtered_mod_pct_plot_obj is not None:
 		filtered_summary_plot_objects.append(filtered_mod_pct_plot_obj)
 
 	#
 	amp_score_plot_obj = plot_amp_score(output_root, config=amplicon_score_config)
+	record_plot("amplicon_score_plot", amp_score_plot_obj)
 	if amp_score_plot_obj is not None:
 		filtered_summary_plot_objects.append(amp_score_plot_obj)
 
 	from CRISPRSCope.editing_rate_ci import remove_editing_rate_plot_artifacts
+	remove_optional_artifacts(
+		(
+			"editing_rate_confidence_intervals_plot",
+			"editing_rate_coverage_adjusted_effects_plot",
+			"editing_rate_unconditional_permutation_plot",
+			"editing_rate_observed_centered_permutation_swarm_plot",
+			"editing_rate_depth_stability_plot",
+		)
+	)
 	remove_editing_rate_plot_artifacts(output_root)
 
 	editing_rate_significant_amplicons = None
@@ -862,10 +921,42 @@ def main():
 			n_processes=n_processes,
 		)
 		filtered_summary_plot_objects.extend(editing_rate_ci_plot_objects)
+		if manifest is not None:
+			created_roots = {plot.name for plot in editing_rate_ci_plot_objects}
+			for key in (
+				"editing_rate_confidence_intervals_plot",
+				"editing_rate_coverage_adjusted_effects_plot",
+				"editing_rate_unconditional_permutation_plot",
+				"editing_rate_observed_centered_permutation_swarm_plot",
+			):
+				if outputs.plot_root(key) in created_roots:
+					manifest.mark_written(key)
+				else:
+					manifest.mark_skipped(key, "plot requirements were not met")
 		logging.info(
 			"Generated editing-rate confidence intervals in %.2f seconds",
 			time.time() - start_editing_rate_ci,
 		)
+	else:
+		remove_optional_artifacts(
+			(
+				"editing_rate_ci",
+				"editing_rate_unconditional_permutation",
+				"editing_rate_unconditional_simulations",
+			),
+			"write_editing_rate_ci is disabled",
+		)
+		if manifest is not None:
+			for key in (
+				"editing_rate_ci",
+				"editing_rate_unconditional_permutation",
+				"editing_rate_unconditional_simulations",
+				"editing_rate_confidence_intervals_plot",
+				"editing_rate_coverage_adjusted_effects_plot",
+				"editing_rate_unconditional_permutation_plot",
+				"editing_rate_observed_centered_permutation_swarm_plot",
+			):
+				manifest.mark_skipped(key, "write_editing_rate_ci is disabled")
 
 	if editing_rate_depth_stability_config.enabled:
 		start_editing_rate_depth_stability = time.time()
@@ -878,10 +969,25 @@ def main():
 			significant_amplicons=editing_rate_significant_amplicons,
 		)
 		filtered_summary_plot_objects.extend(depth_stability_plot_objects)
+		if manifest is not None:
+			if depth_stability_plot_objects:
+				manifest.mark_written("editing_rate_depth_stability_plot")
+			else:
+				manifest.mark_skipped(
+					"editing_rate_depth_stability_plot", "plot requirements were not met"
+				)
 		logging.info(
 			"Generated editing-rate depth stability analysis in %.2f seconds",
 			time.time() - start_editing_rate_depth_stability,
 		)
+	else:
+		remove_optional_artifacts(
+			("editing_rate_depth_stability",),
+			"write_editing_rate_depth_stability is disabled",
+		)
+		if manifest is not None:
+			for key in ("editing_rate_depth_stability", "editing_rate_depth_stability_plot"):
+				manifest.mark_skipped(key, "write_editing_rate_depth_stability is disabled")
 
 
 	# # filtered_read_count_plot_obj = generate_read_depth_boxplots(output_root, cell_quality_to_analyze)
@@ -939,14 +1045,18 @@ def main():
 			filtered_crispresso_sub_html_files[amplicon_name] = relative_filtered_crispresso_dir + "/" "CRISPResso_on_" + amplicon_name + ".html"
   
 	
-	make_report(report_file=output_root+".html",
+	make_report(report_file=outputs.path("report"),
 				report_name = "Dataset Summary Report",
 				results_folder='',
 				crispresso_run_names=crispresso_run_names,
 				crispresso_sub_html_files=filtered_crispresso_sub_html_files,
 				summary_plot_objects=filtered_summary_plot_objects)
+	if manifest is not None:
+		manifest.mark_written("report")
 
 	if write_h5ad:
+		if manifest is not None:
+			manifest.set_stage("write_h5ad")
 		start_h5ad = time.time()
 		h5ad_file = write_h5ad_output(
 			output_root=output_root,
@@ -956,9 +1066,40 @@ def main():
 			n_processes=n_processes,
 		)
 		end_h5ad = time.time() - start_h5ad
+		if manifest is not None:
+			manifest.mark_written("h5ad")
 		logging.info("Generated h5ad output at %s in %.2f seconds", h5ad_file, end_h5ad)
+	elif manifest is not None:
+		manifest.mark_skipped("h5ad", "write_h5ad is disabled")
 
+	if manifest is not None:
+		manifest.set_stage("finalize")
 	logging.info('Finished')
+
+
+def main():
+	"""Run the pipeline and, when requested, write its diagnostic manifest."""
+	global _ACTIVE_OUTPUT_MANIFEST
+	_ACTIVE_OUTPUT_MANIFEST = None
+	try:
+		result = _main_impl()
+	except BaseException as error:
+		manifest = _ACTIVE_OUTPUT_MANIFEST
+		if manifest is not None:
+			manifest.fail(manifest.active_stage or "initialization", error)
+			try:
+				manifest.write()
+			except BaseException:
+				logging.exception("Failed to write output manifest after pipeline failure")
+		raise
+	else:
+		manifest = _ACTIVE_OUTPUT_MANIFEST
+		if manifest is not None:
+			manifest.complete()
+			manifest.write()
+		return result
+	finally:
+		_ACTIVE_OUTPUT_MANIFEST = None
 		
 	
 def generate_amplicon_coverage_plot(output_root, cell_quality_to_analyze):
@@ -1061,20 +1202,12 @@ def generate_amplicon_coverage_plot(output_root, cell_quality_to_analyze):
 	ax.set_xlabel("Amplicons", fontsize = 22)
 	ax.set_xticks([])
 	
-	amplicon_cov_plot_root = output_root + ".09_AmpliconCoverage"
+	amplicon_cov_plot_root = OutputContext(output_root).plot_root("amplicon_coverage_plot")
 	plt.savefig(amplicon_cov_plot_root+".pdf", pad_inches = 1, bbox_inches = "tight")
 	plt.savefig(amplicon_cov_plot_root+".png", pad_inches = 1, bbox_inches = "tight") 
 	
 	logging.info("Finished generating the average amplicon coverage plot.")
-	summary_plot_obj = PlotObject(
-			plot_name = amplicon_cov_plot_root,
-			plot_title = 'Average Amplicon Read Coverage',
-			plot_label = 'The average read counts covering each amplicon.',
-			plot_datas = [
-				("Amplicon Read Counts (totCounts)", output_root + ".editingSummaryPseudobulk.txt"),
-				("Filtered cell barcodes", output_root + ".amplicon_score.txt"),
-				]
-			)
+	summary_plot_obj = declared_plot_object(output_root, "amplicon_coverage_plot")
 	return summary_plot_obj 
 
 def generate_read_depth_boxplots(output_root, cell_quality_to_analyze):
@@ -1163,20 +1296,12 @@ def generate_read_depth_boxplots(output_root, cell_quality_to_analyze):
 	plt.xticks(fontsize=16)
 	plt.tight_layout()
 
-	cell_cov_plot_root = output_root + ".09_CellCoverageBoxplot"
+	cell_cov_plot_root = OutputContext(output_root).plot_root("cell_coverage_boxplot")
 	plt.savefig(cell_cov_plot_root+".pdf", pad_inches = 1, bbox_inches = "tight")
 	plt.savefig(cell_cov_plot_root+".png", pad_inches = 1, bbox_inches = "tight") 
 	
 	logging.info("Finished generating the read counts per barcode barplot plot.")
-	summary_plot_obj = PlotObject(
-			plot_name = cell_cov_plot_root,
-			plot_title = 'Read Counts per Barcode Boxplot',
-			plot_label = 'A boxplot displaying the read counts per barcode in high quality and low quality cells.',
-			plot_datas = [
-				("Barcode Read Counts (totCounts)", output_root + ".editingSummaryPseudobulk.txt"),
-				("Filtered cell barcodes", output_root + ".amplicon_score.txt"),
-				]
-			)
+	summary_plot_obj = declared_plot_object(output_root, "cell_coverage_boxplot")
 	return summary_plot_obj   
 	
 def generate_cell_coverage_plot(output_root, cell_quality_to_analyze):
@@ -1273,20 +1398,12 @@ def generate_cell_coverage_plot(output_root, cell_quality_to_analyze):
 	plt.tight_layout()
 	
 	
-	cell_cov_plot_root = output_root + ".08_CellCoverage"
+	cell_cov_plot_root = OutputContext(output_root).plot_root("cell_coverage_plot")
 	plt.savefig(cell_cov_plot_root+".pdf", pad_inches = 1, bbox_inches = "tight")
 	plt.savefig(cell_cov_plot_root+".png", pad_inches = 1, bbox_inches = "tight") 
 	
 	logging.info("Finished generating the read counts per barcode barplot plot.")
-	summary_plot_obj = PlotObject(
-			plot_name = cell_cov_plot_root,
-			plot_title = 'Read Counts per Barcode',
-			plot_label = 'A barplot displaying the difference in average read count per barcode in high quality and low quality cells.',
-			plot_datas = [
-				("Barcode Read Counts (totCounts)", output_root + ".editingSummaryPseudobulk.txt"),
-				("Filtered cell barcodes", output_root + ".amplicon_score.txt"),
-				]
-			)
+	summary_plot_obj = declared_plot_object(output_root, "cell_coverage_plot")
 	return summary_plot_obj 
 	
 def generate_edit_histogram(output_root, cell_quality_to_analyze):
@@ -1370,20 +1487,12 @@ def generate_edit_histogram(output_root, cell_quality_to_analyze):
 	plt.ylabel("Number of Barcodes", fontsize = 22)
 	plt.tight_layout()
 	
-	hist_plot_root = output_root + ".07_EditHistogram"
+	hist_plot_root = OutputContext(output_root).plot_root("edit_histogram_plot")
 	plt.savefig(hist_plot_root+".pdf", pad_inches = 1, bbox_inches = "tight")
 	plt.savefig(hist_plot_root+".png", pad_inches = 1, bbox_inches = "tight") 
 	
 	logging.info("Finished generating the edit count histogram plot")
-	summary_plot_obj = PlotObject(
-			plot_name = hist_plot_root,
-			plot_title = 'Editing Count Histogram',
-			plot_label = 'A histogram that displays the number of edited sites in each barcode.',
-			plot_datas = [
-				("Filtered modification percentages (modPct)", output_root + ".filteredEditingSummary.txt"),
-				("Filtered cell barcodes", output_root + ".amplicon_score.txt")
-				]
-			)
+	summary_plot_obj = declared_plot_object(output_root, "edit_histogram_plot")
 	return summary_plot_obj 
 	
 def generate_upset_plot(output_root, cell_quality_to_analyze):
@@ -1488,20 +1597,12 @@ def generate_upset_plot(output_root, cell_quality_to_analyze):
 	plt.title("Editing Sites and Intersections", fontsize=24)
 
 	
-	upset_plot_root = output_root + ".06_EditCombinations"
+	upset_plot_root = OutputContext(output_root).plot_root("edit_combinations_plot")
 	plt.savefig(upset_plot_root+".pdf", pad_inches = 1, bbox_inches = "tight")
 	plt.savefig(upset_plot_root+".png", pad_inches = 1, bbox_inches = "tight") 
 	
 	logging.info("Finished generating the edit combination upset plot")
-	summary_plot_obj = PlotObject(
-			plot_name = upset_plot_root,
-			plot_title = 'Editing Sites and Intersections',
-			plot_label = 'An upset plot that displays the most common edits and edit combinations.',
-			plot_datas = [
-				("Filtered modification percentages (modPct)", output_root + ".filteredEditingSummary.txt"),
-				("Filtered cell barcodes", output_root + ".amplicon_score.txt"),
-				]
-			)
+	summary_plot_obj = declared_plot_object(output_root, "edit_combinations_plot")
 	return summary_plot_obj
 
 
@@ -1927,6 +2028,7 @@ def parse_settings(args):
 			debug_rejected_rescue_reads_bam : str,
 			debug_require_strict_amplicon_alignment : bool,
 			partial_rescue_min_mean_read_quality : float,
+			write_output_manifest : bool,
 			settings_file : str
 		)
 
@@ -2061,6 +2163,7 @@ def parse_settings(args):
 	suppress_sub_crispresso_plots = _parse_bool_setting(settings, 'suppress_sub_crispresso_plots', default=False)
 
 	write_h5ad = _parse_bool_setting(settings, 'write_h5ad', default=True)
+	write_output_manifest = _parse_bool_setting(settings, 'write_output_manifest', default=False)
 	
 	# --- normalized cutoffs (use canonical defaults and validate) ---
 	min_total_reads_per_barcode = _parse_int_setting(settings, 'min_total_reads_per_barcode', MIN_TOTAL_READS_PER_BARCODE_DEFAULT, minimum=0)
@@ -2185,7 +2288,7 @@ def parse_settings(args):
 		raise Exception('Error: CRISPResso2 is required')
 
 
-	return (r1, r2, constant1, constant2, allow_barcode_mismatches,barcode_file, amplicon_file, primer_lookup_len, adapter_DNA, amp_file_dir, alt_alleles_file, bowtie2_index, crispresso_dir, output_root, n_processes, keep_intermediate_files, ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze, write_h5ad, h5ad_output, h5ad_export_config, debug_rescued_reads_bam, debug_rejected_rescue_reads_bam, debug_require_strict_amplicon_alignment, partial_rescue_min_mean_read_quality, settings_file)
+	return (r1, r2, constant1, constant2, allow_barcode_mismatches,barcode_file, amplicon_file, primer_lookup_len, adapter_DNA, amp_file_dir, alt_alleles_file, bowtie2_index, crispresso_dir, output_root, n_processes, keep_intermediate_files, ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze, write_h5ad, h5ad_output, h5ad_export_config, debug_rescued_reads_bam, debug_rejected_rescue_reads_bam, debug_require_strict_amplicon_alignment, partial_rescue_min_mean_read_quality, write_output_manifest, settings_file)
 
 
 def write_editing_rate_ci_output(
@@ -2204,11 +2307,12 @@ def write_editing_rate_ci_output(
 		write_editing_rate_unconditional_permutation_plot,
 	)
 
-	editing_summary_path = output_root + ".editingSummary.txt"
-	quality_scores_path = output_root + ".amplicon_score.txt"
-	output_path = output_root + ".editingRateConfidenceIntervals.txt"
-	permutation_output_path = output_root + ".editingRateUnconditionalPermutation.txt"
-	permutation_simulations_output_path = output_root + ".editingRateUnconditionalPermutationSimulations.txt"
+	outputs = OutputContext(output_root)
+	editing_summary_path = outputs.path("editing_summary")
+	quality_scores_path = outputs.path("amplicon_score")
+	output_path = outputs.path("editing_rate_ci")
+	permutation_output_path = outputs.path("editing_rate_unconditional_permutation")
+	permutation_simulations_output_path = outputs.path("editing_rate_unconditional_simulations")
 	editing_summary = pd.read_csv(editing_summary_path, sep="\t", index_col=0)
 	quality_scores = pd.read_csv(quality_scores_path, sep="\t", index_col=0)
 	results, permutation_results, permutation_simulations = compute_editing_rate_resampling_analyses(
@@ -2256,27 +2360,18 @@ def write_editing_rate_ci_output(
 			output_root,
 		)
 	)
-	plot_objects = [
-		PlotObject(
-			plot_name=metadata["plot_name"],
-			plot_title=metadata["plot_title"],
-			plot_label=metadata["plot_label"],
-			plot_datas=(
-				[
-					("Unconditional permutation summary", permutation_output_path),
-					("Unconditional permutation simulations", permutation_simulations_output_path),
-				]
-				if metadata["plot_name"].endswith(
-					(
-						".12_EditingRateUnconditionalPermutation",
-						".13_EditingRateObservedCenteredPermutationSwarm",
-					)
-				)
-				else [("Editing-rate confidence intervals", output_path)]
-			),
+	plot_objects = []
+	for metadata in plot_metadata:
+		artifact_key = metadata["artifact_key"]
+		declared = outputs.plot_metadata(artifact_key)
+		plot_objects.append(
+			PlotObject(
+				plot_name=declared["plot_name"],
+				plot_title=metadata["plot_title"],
+				plot_label=metadata["plot_label"],
+				plot_datas=declared["plot_datas"],
+			)
 		)
-		for metadata in plot_metadata
-	]
 	significant_amplicons = _significant_plot_rows(results)["amplicon"].astype(str).tolist()
 	return plot_objects, significant_amplicons
 
@@ -2295,9 +2390,10 @@ def write_editing_rate_depth_stability_output(
 		write_editing_rate_depth_stability_plot,
 	)
 
-	editing_summary_path = output_root + ".editingSummary.txt"
-	quality_scores_path = output_root + ".amplicon_score.txt"
-	output_path = output_root + ".editingRateDepthStability.txt"
+	outputs = OutputContext(output_root)
+	editing_summary_path = outputs.path("editing_summary")
+	quality_scores_path = outputs.path("amplicon_score")
+	output_path = outputs.path("editing_rate_depth_stability")
 	editing_summary = pd.read_csv(editing_summary_path, sep="\t", index_col=0)
 	quality_scores = pd.read_csv(quality_scores_path, sep="\t", index_col=0)
 	results = compute_editing_rate_depth_stability(
@@ -2318,10 +2414,10 @@ def write_editing_rate_depth_stability_output(
 	)
 	return [
 		PlotObject(
-			plot_name=metadata["plot_name"],
+			plot_name=outputs.plot_metadata(metadata["artifact_key"])["plot_name"],
 			plot_title=metadata["plot_title"],
 			plot_label=metadata["plot_label"],
-			plot_datas=[("Editing-rate depth stability", output_path)],
+			plot_datas=outputs.plot_metadata(metadata["artifact_key"])["plot_datas"],
 		)
 		for metadata in plot_metadata
 	]
@@ -3762,7 +3858,8 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 		amp_filehandles[amp_name][0].close()
 		amp_filehandles[amp_name][1].close()
 
-	identified_amplicon_file = output_root + ".splitReads.valid_amps.txt"
+	outputs = OutputContext(output_root)
+	identified_amplicon_file = outputs.path("valid_amplicons")
 	with open(identified_amplicon_file,'w') as fout:
 		for amp in amplicon_names:
 			amp_aln_count = amplicon_count[amp]
@@ -3773,7 +3870,7 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 	logging.info("Cells not meeting the cell requirement: " + str(len(failing_barcode))) 
 	logging.info("Total Barcode Count: " + str(len(tot_barcode_count)))
 		   
-	aligned_read_file = output_root + ".splitReads.aligned.txt"
+	aligned_read_file = outputs.path("aligned_read_counts")
 	logging.info("Writing aligned reads to " + aligned_read_file)
 	with open(aligned_read_file,'w') as fout:
 		fout.write("Barcode\tAligned Count\n")
@@ -3781,7 +3878,7 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 			fout.write("%s\t%d\n"%(barcode,aln_barcode_count[barcode]))
 	logging.info("Finished writing aligned read file")
 	
-	unaligned_read_file = output_root + ".splitReads.unaligned.txt"
+	unaligned_read_file = outputs.path("unaligned_read_counts")
 	logging.info('Writing unaligned reads to ' + unaligned_read_file)
 	with open(unaligned_read_file,'w') as fout:
 		fout.write("Barcode\tUnaligned Count\n")
@@ -3789,7 +3886,7 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 			fout.write("%s\t%d\n"%(barcode,unaln_barcode_count[barcode]))
 	logging.info("Finished writing unaligned read file")
 
-	identified_amplicon_aln_file = output_root + ".splitReads.amp_classification.txt"
+	identified_amplicon_aln_file = outputs.path("amplicon_classification")
 	with open(identified_amplicon_aln_file,'w') as fout:
 		fout.write("\t".join(['is_valid','amp1_from_seq','amp2_from_seq','amp1_from_align','amp2_from_align'])+"\n")
 		for amp_key in sorted(aln_count.keys()):
@@ -3898,7 +3995,10 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 def _decompressed_fastq_sha256(path):
 	"""Return a stable SHA-256 digest of decompressed FASTQ content."""
 	digest = hashlib.sha256()
-	with gzip.open(path, 'rb') as handle:
+	with open(path, 'rb') as raw_handle:
+		is_gzip = raw_handle.read(2) == b'\x1f\x8b'
+	open_fastq = gzip.open if is_gzip else open
+	with open_fastq(path, 'rb') as handle:
 		for chunk in iter(lambda: handle.read(1024 * 1024), b''):
 			digest.update(chunk)
 	return digest.hexdigest()
@@ -5002,7 +5102,8 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 
 	cells = sorted(data.keys())
 
-	with open(output_root+".editingSummaryPseudobulk.txt",'w') as fout:
+	outputs = OutputContext(output_root)
+	with open(outputs.path("editing_summary_pseudobulk"),'w') as fout:
 		header = "cell"
 		for name in amplicon_names:
 			header += "\ttotCount.%s\tmodPct.%s"%(name,name)
@@ -5019,7 +5120,7 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 				line += val
 			fout.write(line+"\n")
 
-	with open(output_root+".editingSummary.txt",'w') as fout:
+	with open(outputs.path("editing_summary"),'w') as fout:
 		header = "cell"
 		for name in amplicon_names:
 			header += "\ttotCount.%s\tmodPct.%s"%(name,name)
@@ -5069,7 +5170,7 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 	
 	# Always regenerate so scoring-code or setting changes cannot leave stale
 	# classifications in downstream filtered outputs.
-	amp_score_file = output_root + ".amplicon_score.txt"
+	amp_score_file = outputs.path("amplicon_score")
 	amplicon_score_time = time.time()
 	amp_score = generate_amplicon_score(
 		totCols,
@@ -5081,7 +5182,7 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 	end_amplicon_score_time = time.time() - amplicon_score_time
 	logging.info("Generated supported-breadth amplicon score in %.2f seconds", end_amplicon_score_time)
 
-	with open(output_root+".filteredEditingSummaryPseudobulk.txt",'w') as fout:
+	with open(outputs.path("filtered_editing_summary_pseudobulk"),'w') as fout:
 		header = "cell"
 		for name in amplicon_names:
 			header += "\ttotCount.%s\tmodPct.%s"%(name,name)
@@ -5235,7 +5336,8 @@ def write_filtered_editing_summary_from_filtered_crispresso(
 	"""
 	Write filteredEditingSummary from filtered CRISPResso allele classifications.
 	"""
-	amp_score_file = output_root + ".amplicon_score.txt"
+	outputs = OutputContext(output_root)
+	amp_score_file = outputs.path("amplicon_score")
 	if not os.path.isfile(amp_score_file):
 		raise FileNotFoundError("Amplicon score file does not exist: " + amp_score_file)
 	amp_score = pd.read_csv(amp_score_file, sep="\t", index_col=0)
@@ -5268,7 +5370,7 @@ def write_filtered_editing_summary_from_filtered_crispresso(
 			filtered_data[cell][amplicon_name] = call_data
 
 	_write_filtered_summary_table(
-		output_root + ".filteredEditingSummary.txt",
+		outputs.path("filtered_editing_summary"),
 		amplicon_names,
 		cells,
 		set(usable_amplicon_names),
@@ -5276,7 +5378,7 @@ def write_filtered_editing_summary_from_filtered_crispresso(
 	)
 	logging.info("Finished writing filtered editing summary for %d filtered cells", len(cells))
 
-	filtered_summary = pd.read_csv(output_root + ".filteredEditingSummary.txt", sep="\t", index_col=0)
+	filtered_summary = pd.read_csv(outputs.path("filtered_editing_summary"), sep="\t", index_col=0)
 	return add_color_information(filtered_summary, amp_score)
 
 
@@ -5566,23 +5668,12 @@ def plot_amp_score(output_root, config=None):
 				 str(summary_stats.iloc[i, 2]) + " Barcode Counts: " + str(summary_stats.iloc[i, 0]),
 				 fontsize = 16, color = summary_stats.iloc[i, 1], ha = 'right')
 	
-	amp_plot_root = output_root + ".05_Amplicon_Score"
+	amp_plot_root = OutputContext(output_root).plot_root("amplicon_score_plot")
 	plt.savefig(amp_plot_root + ".pdf", pad_inches = 1, bbox_inches = "tight")
 	plt.savefig(amp_plot_root + ".png", pad_inches = 1, bbox_inches = "tight")
 	   
 	logging.info("Finished amplicon score plot")
-	summary_plot_obj = PlotObject(
-		plot_name = amp_plot_root,
-		plot_title = 'Supported Amplicon Breadth Plot',
-		plot_label = (
-			"Barcode rank versus the fraction of usable amplicons meeting the "
-			"configured read-support threshold. Dashed lines show the configured "
-			"breadth and barcode-rank classification boundaries."
-		),
-		plot_datas = [
-			("Amplicon Score", output_root + ".amplicon_score.txt")
-		]
-	) 
+	summary_plot_obj = declared_plot_object(output_root, "amplicon_score_plot")
 	return summary_plot_obj 
 	 
 def log_log_plot(parsed_information, output_root, cell_quality_to_analyze, filtered = True):
@@ -5715,22 +5806,17 @@ def log_log_plot(parsed_information, output_root, cell_quality_to_analyze, filte
 	plt.legend(handles=legend_elements, fontsize = 16)
 	
 	if filtered:
-		log_log_root = output_root + ".01_Log-Log_filtered"
+		log_log_root = OutputContext(output_root).plot_root("log_log_filtered_plot")
+		log_log_artifact_key = "log_log_filtered_plot"
 	else:
-		log_log_root = output_root + ".01_Log-Log"
+		log_log_root = OutputContext(output_root).plot_root("log_log_plot")
+		log_log_artifact_key = "log_log_plot"
 		
 	plt.savefig(log_log_root + ".pdf", pad_inches = 1, bbox_inches = "tight")
 	plt.savefig(log_log_root + ".png", pad_inches = 1, bbox_inches = "tight")
 	   
 	logging.info("Finished log-log plot")
-	summary_plot_obj = PlotObject(
-		plot_name = log_log_root,
-		plot_title = 'Log-Log Plot',
-		plot_label = "Log scale plot of the Barcode Rank (X) vs. Read Count (Y) with color coding according to Amplicon Score category.",
-		plot_datas = [
-			
-		]
-	)
+	summary_plot_obj = declared_plot_object(output_root, log_log_artifact_key)
 	
 	return summary_plot_obj 
 		
@@ -5818,18 +5904,12 @@ def cell_per_amp_filtered(parsed_information, output_root, cell_quality_to_analy
 	plt.xlabel('Amplicons', fontsize = 22)
 	plt.ylabel('Cell count', fontsize = 22)
 	plt.tight_layout()
-	cell_per_amp_root = output_root + ".02_CellCountPerAmplicon_filtered"
+	cell_per_amp_root = OutputContext(output_root).plot_root("cell_count_per_amplicon_plot")
 	plt.savefig(cell_per_amp_root+".pdf", pad_inches = 1, bbox_inches = "tight")
 	plt.savefig(cell_per_amp_root+".png", pad_inches = 1, bbox_inches = "tight")
 
 	logging.info("Finished cell count per amplicon plot")
-	summary_plot_obj = PlotObject(
-			plot_name = cell_per_amp_root,
-			plot_title = 'Cell count per amplicon with minimum specified coverage',
-			plot_label = 'Plotting the number of cells covering an amplicon at a given read cutoff. The log cell counts are on the Y-axis and the amplicon is on the X-axis.',
-			plot_datas = [
-				]
-			)
+	summary_plot_obj = declared_plot_object(output_root, "cell_count_per_amplicon_plot")
 	return summary_plot_obj
  
 
@@ -5945,17 +6025,11 @@ def amp_per_cell_filtered(parsed_information, output_root, cell_quality_to_analy
 	plt.xlabel('Number of amplicon targets covered', fontsize = 16)
 	plt.ylabel('Cell count', fontsize = 16)
 	plt.tight_layout()
-	amp_per_cell_obj_root = output_root + ".03_AmpliconCoveredPerCell_filtered"
+	amp_per_cell_obj_root = OutputContext(output_root).plot_root("amplicon_covered_per_cell_plot")
 	plt.savefig(amp_per_cell_obj_root+".png", pad_inches=1, bbox_inches='tight')
 	plt.savefig(amp_per_cell_obj_root+".pdf", pad_inches=1, bbox_inches='tight') 
 
-	summary_plot_obj = PlotObject(
-		plot_name = amp_per_cell_obj_root,
-		plot_title = "Amplicons covered per cell with minimum specified coverage",
-		plot_label = "The number of cells with amplicon coverage at a given read cutoff. The number of amplicons covered is on the X-axis and the cell count is on the Y-axis.",
-		plot_datas = [
-		]
-	)
+	summary_plot_obj = declared_plot_object(output_root, "amplicon_covered_per_cell_plot")
 	logging.info("Finished Amplicon coverage per cell plot.")
 	
 	return summary_plot_obj
@@ -6060,17 +6134,11 @@ def mod_per_amp_filtered(parsed_information, output_root, cell_quality_to_analyz
 	plt.ylabel('Modification Percentage', fontsize = 22)
 	plt.tight_layout()
 	
-	mod_pct_plot_obj_root = output_root + ".04_ModPercentagePerAmp_filtered" 
+	mod_pct_plot_obj_root = OutputContext(output_root).plot_root("modification_percentage_plot")
 	plt.savefig(mod_pct_plot_obj_root+".pdf",pad_inches=1,bbox_inches='tight')
 	plt.savefig(mod_pct_plot_obj_root+".png",pad_inches=1,bbox_inches='tight')
 	logging.info("Finished modification percentage per amplicon plot.")
-	summary_plot_obj = PlotObject(
-			plot_name = mod_pct_plot_obj_root,
-			plot_title = 'Average modification by target',
-			plot_label = 'The average modification percentage (Y) of an amplicon (X) with a minimum specified read coverage.',
-			plot_datas = [
-				]
-			)
+	summary_plot_obj = declared_plot_object(output_root, "modification_percentage_plot")
 	return summary_plot_obj
 
 
@@ -6146,6 +6214,17 @@ class PlotObject:
 
 	def __repr__(self):
 		return f'PlotObject(name={self.name}, title={self.title}, label={self.label}, datas={self.datas} order={self.order})'
+
+
+def declared_plot_object(output_root, artifact_key):
+	"""Build report metadata from a registered plot artifact."""
+	metadata = OutputContext(output_root).plot_metadata(artifact_key)
+	return PlotObject(
+		plot_name=metadata["plot_name"],
+		plot_title=metadata["plot_title"],
+		plot_label=metadata["plot_label"],
+		plot_datas=metadata["plot_datas"],
+	)
 
 
 

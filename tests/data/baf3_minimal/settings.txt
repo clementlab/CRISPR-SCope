@@ -32,3 +32,4 @@ editing_rate_ci_coverage_exact_max_reads	10
 editing_rate_ci_coverage_bin_width_reads	5
 write_editing_rate_depth_stability	False
 write_h5ad	False
+write_output_manifest	False

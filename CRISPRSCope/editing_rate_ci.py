@@ -10,6 +10,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from CRISPRSCope.output_artifacts import OutputContext
 
 
 RESULT_COLUMNS = [
@@ -1147,7 +1148,12 @@ def _significant_plot_rows(results: pd.DataFrame) -> pd.DataFrame:
 
 def _remove_plot_artifacts(output_root: str, suffixes: Sequence[str]) -> None:
     """Remove PNG/PDF artifacts that may have been created by an earlier run."""
+    outputs = OutputContext(output_root)
     for suffix in suffixes:
+        registered_key = outputs.key_for_suffix(suffix)
+        if registered_key is not None:
+            outputs.remove((registered_key,))
+            continue
         for extension in (".png", ".pdf"):
             path = output_root + suffix + extension
             try:
@@ -1375,12 +1381,15 @@ def _write_coverage_adjusted_effect_plot(
         ax.set_xlim(*interval_limits)
     ax.grid(axis="x", alpha=0.25)
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
-    plot_root = output_root + ".11_EditingRateCoverageAdjustedEffects"
+    plot_root = OutputContext(output_root).plot_root(
+        "editing_rate_coverage_adjusted_effects_plot"
+    )
     fig.savefig(plot_root + ".pdf", bbox_inches="tight")
     fig.savefig(plot_root + ".png", bbox_inches="tight")
     plt.close(fig)
     return [
         {
+            "artifact_key": "editing_rate_coverage_adjusted_effects_plot",
             "plot_name": plot_root,
             "plot_title": "Raw and coverage-adjusted editing-rate effects",
             "plot_label": (
@@ -1480,12 +1489,15 @@ def write_editing_rate_unconditional_permutation_plot(
     ax.grid(axis="y", alpha=0.25)
     ax.legend(loc="best")
     fig.tight_layout()
-    plot_root = output_root + suffix
+    plot_root = OutputContext(output_root).plot_root(
+        "editing_rate_unconditional_permutation_plot"
+    )
     fig.savefig(plot_root + ".pdf", bbox_inches="tight")
     fig.savefig(plot_root + ".png", bbox_inches="tight")
     plt.close(fig)
     return [
         {
+            "artifact_key": "editing_rate_unconditional_permutation_plot",
             "plot_name": plot_root,
             "plot_title": "Unconditional editing-rate permutation distribution",
             "plot_label": (
@@ -1637,12 +1649,15 @@ def write_editing_rate_observed_centered_permutation_swarm_plot(
     ax.grid(axis="x", alpha=0.25)
     ax.legend(loc="best")
     fig.tight_layout()
-    plot_root = output_root + suffix
+    plot_root = OutputContext(output_root).plot_root(
+        "editing_rate_observed_centered_permutation_swarm_plot"
+    )
     fig.savefig(plot_root + ".pdf", bbox_inches="tight")
     fig.savefig(plot_root + ".png", bbox_inches="tight")
     plt.close(fig)
     return [
         {
+            "artifact_key": "editing_rate_observed_centered_permutation_swarm_plot",
             "plot_name": plot_root,
             "plot_title": "Observed-centered unconditional permutation swarm",
             "plot_label": (
@@ -1731,12 +1746,15 @@ def write_editing_rate_ci_plots(results: pd.DataFrame, output_root: str) -> List
         ax.legend()
         ax.grid(axis="x", alpha=0.25)
         fig.tight_layout()
-        plot_root = output_root + ".10_EditingRateConfidenceIntervals"
+        plot_root = OutputContext(output_root).plot_root(
+            "editing_rate_confidence_intervals_plot"
+        )
         fig.savefig(plot_root + ".pdf", bbox_inches="tight")
         fig.savefig(plot_root + ".png", bbox_inches="tight")
         plt.close(fig)
         plot_metadata.append(
             {
+                "artifact_key": "editing_rate_confidence_intervals_plot",
                 "plot_name": plot_root,
                 "plot_title": "Amplicon editing-rate confidence intervals",
                 "plot_label": (
@@ -1997,7 +2015,9 @@ def write_editing_rate_depth_stability_plot(
         title="Editing-Rate Stability Across Cell-Depth Downsampling",
         y_label="Deviation from full-cohort editing rate (percentage points)",
     )
-    absolute_plot_root = output_root + ".14_EditingRateDepthStability"
+    absolute_plot_root = OutputContext(output_root).plot_root(
+        "editing_rate_depth_stability_plot"
+    )
     _save_depth_stability_figure(absolute_figure, absolute_plot_root)
     significance_clause = (
         " among amplicons with a coverage-adjusted BH p-value at or below 0.05"
@@ -2006,6 +2026,7 @@ def write_editing_rate_depth_stability_plot(
     )
     return [
         {
+            "artifact_key": "editing_rate_depth_stability_plot",
             "plot_name": absolute_plot_root,
             "plot_title": "Editing-rate cell-depth stability",
             "plot_label": (

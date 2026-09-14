@@ -62,6 +62,7 @@ def test_parse_settings_resolves_relative_paths_from_settings_file(tmp_path, mon
 	assert parsed[13] == str(tmp_path / "results" / "run")
 	assert parsed[23] == str(tmp_path / "results" / "custom.h5ad")
 	assert parsed[25] == str(tmp_path / "debug" / "rescued.bam")
+	assert parsed[-2] is False
 
 
 def test_parse_settings_rejects_legacy_primer_lookup_key(tmp_path, monkeypatch):
@@ -70,6 +71,14 @@ def test_parse_settings_rejects_legacy_primer_lookup_key(tmp_path, monkeypatch):
 
 	with pytest.raises(ValueError, match="primerLookupLen is no longer supported"):
 		cli.parse_settings(sys.argv)
+
+
+def test_parse_settings_enables_output_manifest(tmp_path, monkeypatch):
+	settings = _write_minimal_settings(
+		tmp_path, extra_lines=["write_output_manifest\tTrue"]
+	)
+
+	assert _parse_settings(settings, monkeypatch)[-2] is True
 
 
 def test_parse_settings_rejects_non_tab_lines(tmp_path, monkeypatch):
@@ -162,6 +171,25 @@ def test_filtered_crispresso_command_stays_single_end_without_crispresso_merge(t
 	allele_fastq.write_text("\n")
 	(actual_crispresso_dir / "ampA.finished").write_text("\n")
 	(run_folder / "CRISPResso2_info.json").write_text("{}\n")
+	info_file = tmp_path / "run.crispresso.filtered.info.txt"
+	info_file.write_text(
+		"\t".join(
+			[
+				"name", "input_sha256", "crispresso_command", "crispresso_run_folder",
+				"finished_file", "log_file", "crispresso_result", "status",
+			]
+		)
+		+ "\n"
+		+ "\t".join(
+			[
+				"ampA", cli._decompressed_fastq_sha256(str(allele_fastq)),
+				f"CRISPResso -r1 {allele_fastq}", str(run_folder),
+				str(actual_crispresso_dir / "ampA.finished"), str(actual_crispresso_dir / "ampA.log"),
+				"Completed", "Completed",
+			]
+		)
+		+ "\n"
+	)
 
 	result = cli.run_crispresso_commands(
 		["ampA"],

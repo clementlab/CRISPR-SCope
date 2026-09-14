@@ -226,9 +226,9 @@ def test_mean_phred_quality():
 def test_parse_settings_strict_alignment_debug_mode_defaults_false(tmp_path, monkeypatch):
 	result = _parse_settings_for_test(tmp_path, monkeypatch)
 
-	assert result[-3] is False
-	assert result[-2] == cli.PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT
-	assert result[-4] == ""
+	assert result[-4] is False
+	assert result[-3] == cli.PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT
+	assert result[-5] == ""
 
 
 def test_parse_settings_strict_alignment_debug_mode_parses_true(tmp_path, monkeypatch):
@@ -238,7 +238,7 @@ def test_parse_settings_strict_alignment_debug_mode_parses_true(tmp_path, monkey
 		extra_lines=["debug_require_strict_amplicon_alignment\ttrue"],
 	)
 
-	assert result[-3] is True
+	assert result[-4] is True
 
 
 def test_parse_settings_rescue_quality_threshold_parses_float(tmp_path, monkeypatch):
@@ -248,7 +248,7 @@ def test_parse_settings_rescue_quality_threshold_parses_float(tmp_path, monkeypa
 		extra_lines=["partial_rescue_min_mean_read_quality\t28.5"],
 	)
 
-	assert result[-2] == 28.5
+	assert result[-3] == 28.5
 
 
 def test_parse_settings_rejected_rescue_bam_true_uses_output_root(tmp_path, monkeypatch):
@@ -258,7 +258,7 @@ def test_parse_settings_rejected_rescue_bam_true_uses_output_root(tmp_path, monk
 		extra_lines=["debug_rejected_rescue_reads_bam\ttrue"],
 	)
 
-	assert result[-4].endswith("run.splitReads.rejected_rescue_candidates.bam")
+	assert result[-5].endswith("run.splitReads.rejected_rescue_candidates.bam")
 
 
 def test_parse_settings_rejects_strict_alignment_with_assign_all(tmp_path, monkeypatch):

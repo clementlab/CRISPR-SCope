@@ -164,6 +164,7 @@ editing_rate_ci_seed	42
 editing_rate_ci_coverage_exact_max_reads	10
 editing_rate_ci_coverage_bin_width_reads	5
 write_h5ad	True
+write_output_manifest	False
 h5ad_output	results/demo_run.h5ad
 h5ad_wt_max_mod_pct	20
 h5ad_het_max_mod_pct	80
@@ -260,6 +261,7 @@ You may also use `genome` instead of `bowtie2_index`; internally the pipeline re
 | `editing_rate_depth_stability_percentages` | `10,25,50,75,90` | Strictly increasing, unique retained-cell percentages between 0 and 100; an exact 100% reference is added automatically. |
 | `write_h5ad` | `True` | Enables `.h5ad` export after the main run. |
 | `h5ad_output` | `<output_root>.h5ad` | Output path for the generated `.h5ad` file. |
+| `write_output_manifest` | `False` | Writes `<output_root>.outputManifest.json`, an ordered diagnostic inventory of output status, paths, data links, and any pipeline failure. |
 
 ### Cell-Quality Inclusion Flags
 
@@ -350,6 +352,12 @@ results/demo_run.12_EditingRateUnconditionalPermutation.{png,pdf}
 results/demo_run.13_EditingRateObservedCenteredPermutationSwarm.{png,pdf}
 results/demo_run.h5ad
 ```
+
+When `write_output_manifest=True`, CRISPRSCope also writes
+`results/demo_run.outputManifest.json`. This compact diagnostic inventory
+records each declared final artifact's path and lifecycle status, linked data
+artifacts, intermediate-directory summaries, and the active stage/error if a
+run fails.
 
 When `write_editing_rate_depth_stability=True`, the additional detailed outputs are:
 

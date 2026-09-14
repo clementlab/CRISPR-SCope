@@ -37,3 +37,4 @@ write_editing_rate_depth_stability	False
 editing_rate_depth_stability_iterations	1000
 editing_rate_depth_stability_percentages	10,25,50,75,90
 write_h5ad	True
+write_output_manifest	False
