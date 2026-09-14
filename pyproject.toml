@@ -73,6 +73,10 @@ CRISPRSCope = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = [
+  "integration: end-to-end tests that run external bioinformatics tools",
+]
 
 
 [tool.versioningit]

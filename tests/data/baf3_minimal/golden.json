@@ -1,0 +1,54 @@
+{
+  "hashes": {
+    "amplicon_score": "88ff295575c088b24ebc2b2c10ef7765d37072617ef9c50a135af69b7493db0f",
+    "editing_rate_ci": "a56d5bcd54d43a6f94470aa42381a90be2ebdb10fcc304167106d50f42a9a404",
+    "editing_summary": "739f21d3e1092d4b6952a01d01b0fdbc6d0c3417f346700cf71cdd4cfe225ee7",
+    "unconditional_permutation": "5f2357ea6a69ffd48accb7bb4c269222c72d2d683aed3b7ce9064cd2e2434586",
+    "valid_amplicons": "adcc86e2fe46c30dd37def1794c852ae48edd8e7658d62cf37ebd669996c35d0"
+  },
+  "invariants": {
+    "amplicon_count": 30,
+    "amplicons": [
+      "exon_atm_onTarget_chr9_53504088",
+      "exon_fam154b_offTarget_chr7_82642414",
+      "exon_limk1_offTarget_chr5_134664222",
+      "exon_prmt7_offTarget_chr8_106237550",
+      "exon_birc3_onTarget_chr9_7861254",
+      "exon_kat6b_chr14_21516782",
+      "exon_fitm2_offTarget_chr2_163469544",
+      "exon_focad_offTarget_chr4_88174732",
+      "exon_hells_offTarget_chr19_38970831",
+      "exon_chd2_onTarget_chr7_73505087",
+      "exon_rbbp6_offTarget_chr7_122970937",
+      "exon_samhd1_onTarget_chr2_157134948",
+      "exon_eif2ak4_offTarget_chr2_118462664",
+      "exon_ceacam19_offTarget_chr7_19887761",
+      "exon_pyroxd2_offTarget_chr19_42752568",
+      "exon_wnk2_offTarget_chr13_49068095",
+      "exon_trp53_onTarget_chr11_69588542",
+      "exon_trp53-ps_offTarget_chr17_54420210",
+      "exon_ints1_offTarget_chr5_139775620",
+      "exon_fscb_offTarget_chr12_64472809",
+      "exon_scrt1_offTarget_chr15_76521784",
+      "exon_qrich1_offTarget_chr9_108533947",
+      "exon_mga_onTarget_chr2_119903338",
+      "exon_tmem177_offTarget_chr1_119908689",
+      "exon_zbtb17_offTarget_chr4_141468835",
+      "intron_atm_offTarget_ebf3_chr7_137278443",
+      "intron_atm_offTarget_ebf1_chr11_44922381",
+      "intron_chd2_offTarget_skap1_chr11_96688566",
+      "intron_samhd1_offTarget_mum1_chr10_80239873",
+      "intron_trp53_offTarget_gclm_chr3_122247583"
+    ],
+    "in_group_scored_cell_count": 16,
+    "out_group_scored_cell_count": 48,
+    "score_color_counts": {
+      "HQ_HI": 16,
+      "HQ_LO": 16,
+      "LQ_HI": 16,
+      "LQ_LO": 16
+    },
+    "scored_cell_count": 64,
+    "selected_pair_count": 23583
+  }
+}

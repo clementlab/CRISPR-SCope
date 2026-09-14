@@ -1,0 +1,484 @@
+{
+  "amplicon_score_max_barcode_rank": 32,
+  "amplicons": [
+    "exon_atm_onTarget_chr9_53504088",
+    "exon_fam154b_offTarget_chr7_82642414",
+    "exon_limk1_offTarget_chr5_134664222",
+    "exon_prmt7_offTarget_chr8_106237550",
+    "exon_birc3_onTarget_chr9_7861254",
+    "exon_kat6b_chr14_21516782",
+    "exon_fitm2_offTarget_chr2_163469544",
+    "exon_focad_offTarget_chr4_88174732",
+    "exon_hells_offTarget_chr19_38970831",
+    "exon_chd2_onTarget_chr7_73505087",
+    "exon_rbbp6_offTarget_chr7_122970937",
+    "exon_samhd1_onTarget_chr2_157134948",
+    "exon_eif2ak4_offTarget_chr2_118462664",
+    "exon_ceacam19_offTarget_chr7_19887761",
+    "exon_pyroxd2_offTarget_chr19_42752568",
+    "exon_wnk2_offTarget_chr13_49068095",
+    "exon_trp53_onTarget_chr11_69588542",
+    "exon_trp53-ps_offTarget_chr17_54420210",
+    "exon_ints1_offTarget_chr5_139775620",
+    "exon_fscb_offTarget_chr12_64472809",
+    "exon_scrt1_offTarget_chr15_76521784",
+    "exon_qrich1_offTarget_chr9_108533947",
+    "exon_mga_onTarget_chr2_119903338",
+    "exon_tmem177_offTarget_chr1_119908689",
+    "exon_zbtb17_offTarget_chr4_141468835",
+    "intron_atm_offTarget_ebf3_chr7_137278443",
+    "intron_atm_offTarget_ebf1_chr11_44922381",
+    "intron_chd2_offTarget_skap1_chr11_96688566",
+    "intron_samhd1_offTarget_mum1_chr10_80239873",
+    "intron_trp53_offTarget_gclm_chr3_122247583"
+  ],
+  "barcodes": [
+    {
+      "barcode": "CTGAGGTTAATGTCGCCT",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "CTGCTTAGGTGTCATAGC",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "TCGTGACGTAGCAGACAA",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "TAGGATTAGAAGGAACAG",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "TGCTATGAAGTTAGAGAC",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "GGATCGTTCGGATCAGGT",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "GCGTGAGCTCTCCTGACG",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "GCAACTCGCGCGACACAG",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "GCATTGATCACGCTCTTA",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "GACACCGATATTAGCGGT",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "GTGTCACACCGCATAACT",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "GACGGTGCTTGCGTATCT",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "TCACATACTGCACGCATT",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "GACTTCACCGTCAGTTGT",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "AGACTAGTATTGAGCTCT",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "AGTTGTGTATGAGATCAT",
+      "category": "HQ_HI"
+    },
+    {
+      "barcode": "AGAGCCGCATCCAGCTAT",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "ATAGTCTCCGGTGATAGG",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "ATCGATCCTACGCACACT",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "ATTATGCAGTTCCTCGGT",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "CACGACTCAGACTGCCTG",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "CAGCCGCAATGTGAGTAT",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "CATAAGATCTTCGCTGAG",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "CCTGCGTTACTCGTGTCC",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "CGCAGTGTCCAAGTCGAA",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "CTACTGTCATGACCTCCT",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "GAACCTTCACCTGTCATT",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "GAACTGCAATCTGCGCTG",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "GAGATGTATCTTAGAAGG",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "GTATTACTGCTGAGGTTA",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "TACTCGCTGCCAACAACA",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "TATGATGTGATAGTCAGT",
+      "category": "HQ_LO"
+    },
+    {
+      "barcode": "TGCGTATCTCAACGTCTT",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "CCATTACAGTAGGTTAGT",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "TCAGTGTTCATGTGAGAC",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "ACGTGCTCGTTACACCTT",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "TGCATACATAGACATATC",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "CGAGTAGCACCGAAGCGT",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "TGAACTTGCCATGCCAGT",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "TCATCAGAGGCCATCGCT",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "GTGCACGAGCAAGAGGAG",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "CCACTTCGCTGTCACATA",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "GATCGATACAGCAAGTCC",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "GACAATGTTGCCGAACCA",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "TCTCAGGATTCTACGCAA",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "CATACGCAGAGCATATGG",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "TATGTACCTTCCAAGTAA",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "CTCAGTGATCGTCTGTCC",
+      "category": "LQ_HI"
+    },
+    {
+      "barcode": "AAGGAAGTCAATGCTATC",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "CGCGCACATTTCACCTTG",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "TAGGATTAGGTACCACAA",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "AAGGTGCTGGGTTCGCAA",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "ATATTCGCATGCTATGAA",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "CCAAGTCGATGGTCGCTA",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "CCACACAGACTAACACTG",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "TAACACATCCATTGCAGA",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "TCCAAGTAAGTACGAACG",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "ACAATTCGGCTGAGATAG",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "ATGCAGTTCAGTAGAGGA",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "ACAGCATCAAGAGGACGT",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "TACAGGACTTGCGATACT",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "TCAAGGTCGCCTTATCCG",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "TGCACGATGGTTGACCAT",
+      "category": "LQ_LO"
+    },
+    {
+      "barcode": "AGGTCAGCATAGTAACGG",
+      "category": "LQ_LO"
+    }
+  ],
+  "cells_per_category": 16,
+  "fixture": "baf3_minimal",
+  "pairs_per_cell": 450,
+  "per_amplicon_pair_counts": {
+    "exon_atm_onTarget_chr9_53504088": {
+      "HQ_HI": 358,
+      "HQ_LO": 321,
+      "LQ_HI": 429,
+      "LQ_LO": 277
+    },
+    "exon_birc3_onTarget_chr9_7861254": {
+      "HQ_HI": 492,
+      "HQ_LO": 362,
+      "LQ_HI": 483,
+      "LQ_LO": 271
+    },
+    "exon_ceacam19_offTarget_chr7_19887761": {
+      "HQ_HI": 336,
+      "HQ_LO": 258,
+      "LQ_HI": 437,
+      "LQ_LO": 333
+    },
+    "exon_chd2_onTarget_chr7_73505087": {
+      "HQ_HI": 214,
+      "HQ_LO": 154,
+      "LQ_HI": 166,
+      "LQ_LO": 118
+    },
+    "exon_eif2ak4_offTarget_chr2_118462664": {
+      "HQ_HI": 182,
+      "HQ_LO": 118,
+      "LQ_HI": 139,
+      "LQ_LO": 106
+    },
+    "exon_fam154b_offTarget_chr7_82642414": {
+      "HQ_HI": 76,
+      "HQ_LO": 24,
+      "LQ_HI": 34,
+      "LQ_LO": 27
+    },
+    "exon_fitm2_offTarget_chr2_163469544": {
+      "HQ_HI": 144,
+      "HQ_LO": 97,
+      "LQ_HI": 99,
+      "LQ_LO": 86
+    },
+    "exon_focad_offTarget_chr4_88174732": {
+      "HQ_HI": 298,
+      "HQ_LO": 218,
+      "LQ_HI": 281,
+      "LQ_LO": 194
+    },
+    "exon_fscb_offTarget_chr12_64472809": {
+      "HQ_HI": 24,
+      "HQ_LO": 7,
+      "LQ_HI": 14,
+      "LQ_LO": 12
+    },
+    "exon_hells_offTarget_chr19_38970831": {
+      "HQ_HI": 381,
+      "HQ_LO": 241,
+      "LQ_HI": 341,
+      "LQ_LO": 216
+    },
+    "exon_ints1_offTarget_chr5_139775620": {
+      "HQ_HI": 134,
+      "HQ_LO": 99,
+      "LQ_HI": 142,
+      "LQ_LO": 67
+    },
+    "exon_kat6b_chr14_21516782": {
+      "HQ_HI": 187,
+      "HQ_LO": 162,
+      "LQ_HI": 237,
+      "LQ_LO": 141
+    },
+    "exon_limk1_offTarget_chr5_134664222": {
+      "HQ_HI": 131,
+      "HQ_LO": 107,
+      "LQ_HI": 88,
+      "LQ_LO": 91
+    },
+    "exon_mga_onTarget_chr2_119903338": {
+      "HQ_HI": 178,
+      "HQ_LO": 119,
+      "LQ_HI": 81,
+      "LQ_LO": 124
+    },
+    "exon_prmt7_offTarget_chr8_106237550": {
+      "HQ_HI": 210,
+      "HQ_LO": 139,
+      "LQ_HI": 102,
+      "LQ_LO": 180
+    },
+    "exon_pyroxd2_offTarget_chr19_42752568": {
+      "HQ_HI": 34,
+      "HQ_LO": 12,
+      "LQ_HI": 25,
+      "LQ_LO": 9
+    },
+    "exon_qrich1_offTarget_chr9_108533947": {
+      "HQ_HI": 209,
+      "HQ_LO": 156,
+      "LQ_HI": 177,
+      "LQ_LO": 200
+    },
+    "exon_rbbp6_offTarget_chr7_122970937": {
+      "HQ_HI": 246,
+      "HQ_LO": 161,
+      "LQ_HI": 208,
+      "LQ_LO": 111
+    },
+    "exon_samhd1_onTarget_chr2_157134948": {
+      "HQ_HI": 186,
+      "HQ_LO": 94,
+      "LQ_HI": 81,
+      "LQ_LO": 73
+    },
+    "exon_scrt1_offTarget_chr15_76521784": {
+      "HQ_HI": 231,
+      "HQ_LO": 138,
+      "LQ_HI": 173,
+      "LQ_LO": 153
+    },
+    "exon_tmem177_offTarget_chr1_119908689": {
+      "HQ_HI": 405,
+      "HQ_LO": 283,
+      "LQ_HI": 368,
+      "LQ_LO": 271
+    },
+    "exon_trp53-ps_offTarget_chr17_54420210": {
+      "HQ_HI": 207,
+      "HQ_LO": 124,
+      "LQ_HI": 141,
+      "LQ_LO": 112
+    },
+    "exon_trp53_onTarget_chr11_69588542": {
+      "HQ_HI": 103,
+      "HQ_LO": 67,
+      "LQ_HI": 52,
+      "LQ_LO": 93
+    },
+    "exon_wnk2_offTarget_chr13_49068095": {
+      "HQ_HI": 457,
+      "HQ_LO": 225,
+      "LQ_HI": 241,
+      "LQ_LO": 348
+    },
+    "exon_zbtb17_offTarget_chr4_141468835": {
+      "HQ_HI": 394,
+      "HQ_LO": 307,
+      "LQ_HI": 477,
+      "LQ_LO": 259
+    },
+    "intron_atm_offTarget_ebf1_chr11_44922381": {
+      "HQ_HI": 403,
+      "HQ_LO": 352,
+      "LQ_HI": 396,
+      "LQ_LO": 399
+    },
+    "intron_atm_offTarget_ebf3_chr7_137278443": {
+      "HQ_HI": 194,
+      "HQ_LO": 162,
+      "LQ_HI": 132,
+      "LQ_LO": 145
+    },
+    "intron_chd2_offTarget_skap1_chr11_96688566": {
+      "HQ_HI": 192,
+      "HQ_LO": 141,
+      "LQ_HI": 72,
+      "LQ_LO": 130
+    },
+    "intron_samhd1_offTarget_mum1_chr10_80239873": {
+      "HQ_HI": 244,
+      "HQ_LO": 124,
+      "LQ_HI": 161,
+      "LQ_LO": 98
+    },
+    "intron_trp53_offTarget_gclm_chr3_122247583": {
+      "HQ_HI": 350,
+      "HQ_LO": 300,
+      "LQ_HI": 542,
+      "LQ_LO": 348
+    }
+  },
+  "selected_pair_count": 23583,
+  "selection_seed": 20260914,
+  "source_sha256": {
+    "r1": "93a5e3e72188af4587307955bbb6ea5eb065d1f7b406c886fadf5a0384036352",
+    "r2": "ce66411b64bd973a25b3316fed30865d09230593af37a2e0b92a289b021596f7"
+  }
+}
