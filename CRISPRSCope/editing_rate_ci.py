@@ -1152,7 +1152,7 @@ def _remove_plot_artifacts(output_root: str, suffixes: Sequence[str]) -> None:
     for suffix in suffixes:
         registered_key = outputs.key_for_suffix(suffix)
         if registered_key is not None:
-            outputs.remove((registered_key,))
+            outputs.remove_optional((registered_key,))
             continue
         for extension in (".png", ".pdf"):
             path = output_root + suffix + extension

@@ -233,9 +233,15 @@ class OutputContext:
                 return spec.key
         return None
 
-    def remove(self, keys: Iterable[str]) -> list[str]:
+    def remove_optional(self, keys: Iterable[str]) -> list[str]:
+        """Remove only declared optional artifacts left by an earlier run."""
         removed: list[str] = []
         for key in keys:
+            spec = self.spec(key)
+            if not spec.optional:
+                raise ValueError(
+                    f"Artifact {key!r} is not optional and cannot be removed as stale output"
+                )
             for path in self.paths(key):
                 try:
                     os.remove(path)
@@ -268,25 +274,24 @@ class OutputManifest:
 
     def mark_skipped(self, key: str, reason: str) -> None:
         self.context.spec(key)
+        if self.artifact_status(key) == "removed_stale":
+            return
         self._events[key] = {"status": "skipped", "reason": reason}
 
     def mark_removed_stale(self, key: str, reason: str = "stale output from an earlier run") -> None:
         self.context.spec(key)
         self._events[key] = {"status": "removed_stale", "reason": reason}
 
-    def mark_existing(self) -> None:
-        for spec in ARTIFACT_SPECS:
-            if any(os.path.exists(path) for path in self.context.paths(spec.key)):
-                if self._events[spec.key]["status"] == "not_reached":
-                    self.mark_written(spec.key)
+    def artifact_status(self, key: str) -> str:
+        """Return the current lifecycle status for a declared artifact."""
+        self.context.spec(key)
+        return str(self._events[key]["status"])
 
     def complete(self) -> None:
-        self.mark_existing()
         self.status = "completed"
         self.active_stage = None
 
     def fail(self, stage: str, error: BaseException) -> None:
-        self.mark_existing()
         self.status = "failed"
         self.active_stage = stage
         self.failure = {"type": type(error).__name__, "message": str(error)}

@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from CRISPRSCope.output_artifacts import ARTIFACT_SPECS, INTERMEDIATE_FAMILIES
 
 
 FIXTURE = Path(__file__).parent / "data" / "baf3_minimal"
@@ -38,6 +39,12 @@ def test_baf3_minimal_fixture_matches_golden_baseline(tmp_path):
 
     run_dir = tmp_path / "baf3_minimal"
     shutil.copytree(FIXTURE, run_dir)
+    settings_path = run_dir / "settings.txt"
+    settings_path.write_text(
+        settings_path.read_text().replace(
+            "write_output_manifest\tFalse", "write_output_manifest\tTrue"
+        )
+    )
     subprocess.run(
         [sys.executable, "-m", "CRISPRSCope.cli", "settings.txt"],
         cwd=run_dir,
@@ -55,6 +62,36 @@ def test_baf3_minimal_fixture_matches_golden_baseline(tmp_path):
     assert selected_categories == {"HQ_HI": 16, "HQ_LO": 16, "LQ_HI": 16, "LQ_LO": 16}
 
     output_root = run_dir / "run"
+    output_manifest = json.loads((run_dir / "run.outputManifest.json").read_text())
+    assert output_manifest["schema_version"] == 1
+    assert output_manifest["status"] == "completed"
+    assert [artifact["key"] for artifact in output_manifest["artifacts"]] == [
+        spec.key for spec in ARTIFACT_SPECS
+    ]
+    artifact_statuses = {
+        artifact["key"]: artifact["status"]
+        for artifact in output_manifest["artifacts"]
+    }
+    for key in (
+        "valid_amplicons",
+        "editing_summary",
+        "filtered_editing_summary",
+        "amplicon_score",
+        "editing_rate_ci",
+        "editing_rate_unconditional_permutation",
+        "editing_rate_unconditional_simulations",
+        "report",
+        "output_manifest",
+    ):
+        assert artifact_statuses[key] == "written"
+    assert artifact_statuses["h5ad"] == "skipped"
+    assert artifact_statuses["editing_rate_depth_stability"] == "skipped"
+    family_summaries = {
+        family["key"]: family for family in output_manifest["artifact_families"]
+    }
+    assert list(family_summaries) == [family.key for family in INTERMEDIATE_FAMILIES]
+    assert all(family["exists"] and family["file_count"] > 0 for family in family_summaries.values())
+
     output_files = {
         "valid_amplicons": output_root.with_suffix(".splitReads.valid_amps.txt"),
         "editing_summary": output_root.with_suffix(".editingSummary.txt"),

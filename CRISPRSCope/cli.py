@@ -762,12 +762,24 @@ def _main_impl():
 			manifest.mark_written(key)
 
 	def remove_optional_artifacts(keys, reason="stale output from an earlier run"):
-		removed = set(outputs.remove(keys))
+		removed = set(outputs.remove_optional(keys))
 		if manifest is None:
-			return
+			return set()
 		for key in keys:
 			if any(path in removed for path in outputs.paths(key)):
 				manifest.mark_removed_stale(key, reason)
+		return {key for key in keys if any(path in removed for path in outputs.paths(key))}
+
+	def mark_written(*keys):
+		if manifest is not None:
+			for key in keys:
+				manifest.mark_written(key)
+
+	def mark_skipped_unless_removed(keys, reason, removed_keys):
+		if manifest is not None:
+			for key in keys:
+				if key not in removed_keys:
+					manifest.mark_skipped(key, reason)
 
 	if manifest is not None:
 		manifest.set_stage("parse_and_align_reads")
@@ -783,6 +795,12 @@ def _main_impl():
 	amplicon_names, amplicon_information, amplicon_info_file = split_reads_by_amplicon(aligned_bam, output_root, amplicon_file, alt_alleles_file, primer_lookup_len, amp_file_dir, bowtie2_index, adapter_DNA, n_processes, keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons, debug_rescued_reads_bam, debug_require_strict_amplicon_alignment, debug_rejected_rescue_reads_bam, partial_rescue_min_mean_read_quality)
 	end_split_reads = time.time() - start_split_reads
 	logging.info(f"Split Reads by Amplicon: {end_split_reads}")
+	mark_written(
+		"valid_amplicons",
+		"aligned_read_counts",
+		"unaligned_read_counts",
+		"amplicon_classification",
+	)
 	
 #    print(f"Line266\n{amplicon_names=}\n{amplicon_information=}\n{amplicon_info_file=}")
 
@@ -803,6 +821,12 @@ def _main_impl():
 											  amplicon_score_config=amplicon_score_config)
 	end_parse_crispresso = time.time() - start_parse_crispresso
 	logging.info(f"Parse CRISPResso Outputs: {end_parse_crispresso}")
+	mark_written(
+		"editing_summary",
+		"editing_summary_pseudobulk",
+		"amplicon_score",
+		"filtered_editing_summary_pseudobulk",
+	)
 
 	if manifest is not None:
 		manifest.set_stage("filter_amplicon_reads")
@@ -831,6 +855,7 @@ def _main_impl():
 	)
 	end_filtered_summary = time.time() - start_filtered_summary
 	logging.info(f"Write Filtered Editing Summary: {end_filtered_summary}")
+	mark_written("filtered_editing_summary")
 
 	if manifest is not None:
 		manifest.set_stage("generate_summary_plots")
@@ -921,6 +946,11 @@ def _main_impl():
 			n_processes=n_processes,
 		)
 		filtered_summary_plot_objects.extend(editing_rate_ci_plot_objects)
+		mark_written(
+			"editing_rate_ci",
+			"editing_rate_unconditional_permutation",
+			"editing_rate_unconditional_simulations",
+		)
 		if manifest is not None:
 			created_roots = {plot.name for plot in editing_rate_ci_plot_objects}
 			for key in (
@@ -938,7 +968,7 @@ def _main_impl():
 			time.time() - start_editing_rate_ci,
 		)
 	else:
-		remove_optional_artifacts(
+		removed_keys = remove_optional_artifacts(
 			(
 				"editing_rate_ci",
 				"editing_rate_unconditional_permutation",
@@ -946,8 +976,8 @@ def _main_impl():
 			),
 			"write_editing_rate_ci is disabled",
 		)
-		if manifest is not None:
-			for key in (
+		mark_skipped_unless_removed(
+			(
 				"editing_rate_ci",
 				"editing_rate_unconditional_permutation",
 				"editing_rate_unconditional_simulations",
@@ -955,8 +985,10 @@ def _main_impl():
 				"editing_rate_coverage_adjusted_effects_plot",
 				"editing_rate_unconditional_permutation_plot",
 				"editing_rate_observed_centered_permutation_swarm_plot",
-			):
-				manifest.mark_skipped(key, "write_editing_rate_ci is disabled")
+			),
+			"write_editing_rate_ci is disabled",
+			removed_keys,
+		)
 
 	if editing_rate_depth_stability_config.enabled:
 		start_editing_rate_depth_stability = time.time()
@@ -969,6 +1001,7 @@ def _main_impl():
 			significant_amplicons=editing_rate_significant_amplicons,
 		)
 		filtered_summary_plot_objects.extend(depth_stability_plot_objects)
+		mark_written("editing_rate_depth_stability")
 		if manifest is not None:
 			if depth_stability_plot_objects:
 				manifest.mark_written("editing_rate_depth_stability_plot")
@@ -981,13 +1014,15 @@ def _main_impl():
 			time.time() - start_editing_rate_depth_stability,
 		)
 	else:
-		remove_optional_artifacts(
+		removed_keys = remove_optional_artifacts(
 			("editing_rate_depth_stability",),
 			"write_editing_rate_depth_stability is disabled",
 		)
-		if manifest is not None:
-			for key in ("editing_rate_depth_stability", "editing_rate_depth_stability_plot"):
-				manifest.mark_skipped(key, "write_editing_rate_depth_stability is disabled")
+		mark_skipped_unless_removed(
+			("editing_rate_depth_stability", "editing_rate_depth_stability_plot"),
+			"write_editing_rate_depth_stability is disabled",
+			removed_keys,
+		)
 
 
 	# # filtered_read_count_plot_obj = generate_read_depth_boxplots(output_root, cell_quality_to_analyze)
@@ -1051,8 +1086,7 @@ def _main_impl():
 				crispresso_run_names=crispresso_run_names,
 				crispresso_sub_html_files=filtered_crispresso_sub_html_files,
 				summary_plot_objects=filtered_summary_plot_objects)
-	if manifest is not None:
-		manifest.mark_written("report")
+	mark_written("report")
 
 	if write_h5ad:
 		if manifest is not None:
@@ -1066,8 +1100,7 @@ def _main_impl():
 			n_processes=n_processes,
 		)
 		end_h5ad = time.time() - start_h5ad
-		if manifest is not None:
-			manifest.mark_written("h5ad")
+		mark_written("h5ad")
 		logging.info("Generated h5ad output at %s in %.2f seconds", h5ad_file, end_h5ad)
 	elif manifest is not None:
 		manifest.mark_skipped("h5ad", "write_h5ad is disabled")

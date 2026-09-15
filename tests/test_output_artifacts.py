@@ -47,16 +47,22 @@ def test_intermediate_family_delegates_to_existing_filename_builder(tmp_path):
     assert calls == [{"stage": 3, "tag": "reads_all_cells", "amplicon": "ampA", "read": "r1"}]
 
 
-def test_remove_only_declared_artifacts(tmp_path):
+def test_remove_only_optional_declared_artifacts(tmp_path):
     context = OutputContext(str(tmp_path / "run"))
     declared = tmp_path / "run.14_EditingRateDepthStability.png"
     declared.write_text("stale")
     unrelated = tmp_path / "run.keep-me.txt"
     unrelated.write_text("keep")
 
-    assert context.remove(("editing_rate_depth_stability_plot",)) == [str(declared)]
+    assert context.remove_optional(("editing_rate_depth_stability_plot",)) == [str(declared)]
     assert not declared.exists()
     assert unrelated.exists()
+
+    summary = tmp_path / "run.editingSummary.txt"
+    summary.write_text("summary")
+    with pytest.raises(ValueError, match="not optional"):
+        context.remove_optional(("editing_summary",))
+    assert summary.exists()
 
 
 def test_manifest_records_completed_and_failed_runs_atomically(tmp_path):
@@ -81,6 +87,10 @@ def test_manifest_records_completed_and_failed_runs_atomically(tmp_path):
     assert skipped["reason"] == "analysis is disabled"
     assert not list(tmp_path.glob(".run.outputManifest.json.*.tmp"))
 
+    manifest.mark_removed_stale("editing_rate_depth_stability", "analysis is disabled")
+    manifest.mark_skipped("editing_rate_depth_stability", "analysis is disabled")
+    assert manifest.artifact_status("editing_rate_depth_stability") == "removed_stale"
+
     failed = OutputManifest(context)
     failed.set_stage("run_crispresso")
     error = ValueError("simulated failure")
@@ -103,6 +113,7 @@ def test_cli_main_writes_requested_manifest_on_success_and_preserves_failure(tmp
         cli._ACTIVE_OUTPUT_MANIFEST = OutputManifest(context)
         cli._ACTIVE_OUTPUT_MANIFEST.set_stage("write_summary")
         (tmp_path / "success.editingSummary.txt").write_text("summary")
+        cli._ACTIVE_OUTPUT_MANIFEST.mark_written("editing_summary")
 
     monkeypatch.setattr(cli, "_main_impl", successful_pipeline)
     assert cli.main() is None
@@ -127,6 +138,51 @@ def test_cli_main_writes_requested_manifest_on_success_and_preserves_failure(tmp
         "type": "RuntimeError",
         "message": "expected pipeline failure",
     }
+
+
+def test_manifest_does_not_claim_stale_artifacts_were_written_after_failure(tmp_path, monkeypatch):
+    from CRISPRSCope import cli
+
+    context = OutputContext(str(tmp_path / "stale"))
+    (tmp_path / "stale.editingSummary.txt").write_text("from an earlier run")
+
+    def failing_pipeline():
+        cli._ACTIVE_OUTPUT_MANIFEST = OutputManifest(context)
+        cli._ACTIVE_OUTPUT_MANIFEST.set_stage("parse_and_align_reads")
+        raise RuntimeError("alignment failed")
+
+    monkeypatch.setattr(cli, "_main_impl", failing_pipeline)
+    with pytest.raises(RuntimeError, match="alignment failed"):
+        cli.main()
+
+    payload = json.loads((tmp_path / "stale.outputManifest.json").read_text())
+    artifact = next(item for item in payload["artifacts"] if item["key"] == "editing_summary")
+    assert artifact["status"] == "not_reached"
+
+
+def test_manifest_write_failure_has_the_intended_exception_behavior(tmp_path, monkeypatch):
+    from CRISPRSCope import cli
+
+    success_context = OutputContext(str(tmp_path / "success"))
+
+    def successful_pipeline():
+        cli._ACTIVE_OUTPUT_MANIFEST = OutputManifest(success_context)
+
+    monkeypatch.setattr(cli, "_main_impl", successful_pipeline)
+    monkeypatch.setattr(OutputManifest, "write", lambda self: (_ for _ in ()).throw(OSError("manifest unavailable")))
+    with pytest.raises(OSError, match="manifest unavailable"):
+        cli.main()
+
+    failure_context = OutputContext(str(tmp_path / "failure"))
+
+    def failing_pipeline():
+        cli._ACTIVE_OUTPUT_MANIFEST = OutputManifest(failure_context)
+        cli._ACTIVE_OUTPUT_MANIFEST.set_stage("run_crispresso")
+        raise RuntimeError("pipeline failed")
+
+    monkeypatch.setattr(cli, "_main_impl", failing_pipeline)
+    with pytest.raises(RuntimeError, match="pipeline failed"):
+        cli.main()
 
 
 def test_cli_main_does_not_write_manifest_without_an_active_manifest(tmp_path, monkeypatch):
