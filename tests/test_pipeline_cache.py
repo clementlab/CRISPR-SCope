@@ -346,3 +346,79 @@ def test_crispresso_changed_guide_clears_and_reruns_exact_amplicon(tmp_path, mon
     )
     assert result["ampA"]["status"] == "Completed"
     assert manager.events[-1]["status"] == "invalid"
+
+
+def _seed_parse_crispresso_cache(tmp_path):
+    output_root = str(tmp_path / "run")
+    amp_dir = tmp_path / "run.seq_by_amplicon"
+    amp_dir.mkdir()
+    folder = tmp_path / "CRISPResso_on_ampA"
+    folder.mkdir()
+    (folder / "CRISPResso_output.fastq.gz").write_text("fastq\n")
+    summary_header = (
+        "cell\tall_cell_read_count\tall_cell_mut_pct\tall_cell_allele_string\t"
+        "final_cell_read_count\tfinal_cell_mut_allele_pct\tfinal_cell_allele_string\t"
+        "final_num_refs_covered\tfinal_cell_allele_mod_string\t"
+        "final_cell_allele_mod_types_string\tfinal_cell_allele_readcount_string\t"
+        "final_ref_read_count_string\tfinal_ref_mut_allele_fracs_string\n"
+    )
+    (tmp_path / "CRISPResso_on_ampA.summ").write_text(
+        summary_header + "cellA\t10\t0\tNA\t10\t0\tNA\t1\tU\tU\t10\t10\t0\n"
+    )
+    for suffix in (".summarize_indels.out", ".summarize_alleles.out"):
+        (tmp_path / ("CRISPResso_on_ampA" + suffix)).write_text(
+            "cell\tread_count\tmod_pct\tallele_0\ncellA\t10\t0\tNA\n"
+        )
+    (tmp_path / "CRISPResso_on_ampA.summ.finished").write_text(
+        "Total reads\t10\nCRISPResso2 aligned reads\t10\nIgnore substitutions\tFalse\n"
+    )
+    (amp_dir / "03_alleles_all_cells.ampA.fq").write_text("alleles\n")
+    amp_info = {
+        "ampA": {
+            "amp_seqs": "ACGT",
+            "input_ref_allele_counts": "1",
+        }
+    }
+    manager = CacheManager(output_root)
+    record = crispresso._build_parse_crispresso_cache_record(
+        manager, "ampA", amp_info["ampA"], str(folder), False, 5
+    )
+    manager.commit(
+        record,
+        crispresso._parse_crispresso_cache_requirements(output_root, "ampA", str(folder)),
+    )
+    information = {
+        "ampA": {"status": "Completed", "crispresso_run_folder": str(folder)}
+    }
+    return manager, output_root, amp_info, information
+
+
+def test_parse_crispresso_cache_hit_skips_per_amplicon_parser(tmp_path, monkeypatch):
+    manager, output_root, amp_info, information = _seed_parse_crispresso_cache(tmp_path)
+    monkeypatch.setattr(
+        crispresso,
+        "parse_one_crispresso_output",
+        lambda _args: (_ for _ in ()).throw(AssertionError("cache miss")),
+    )
+    result = crispresso.parse_crispresso_outputs(
+        ["ampA"], amp_info, str(tmp_path / "unused.tsv"), information,
+        output_root, 0, 0, 1, cache_manager=manager,
+    )
+    assert result.loc["cellA", "totCount.ampA"] == 10
+    assert manager.events[-1]["status"] == "hit"
+
+
+def test_parse_crispresso_setting_change_invalidates(tmp_path, monkeypatch):
+    manager, output_root, amp_info, information = _seed_parse_crispresso_cache(tmp_path)
+    monkeypatch.setattr(
+        crispresso,
+        "parse_one_crispresso_output",
+        lambda _args: (_ for _ in ()).throw(RuntimeError("reparse")),
+    )
+    with pytest.raises(RuntimeError, match="reparse"):
+        crispresso.parse_crispresso_outputs(
+            ["ampA"], amp_info, str(tmp_path / "unused.tsv"), information,
+            output_root, 0, 0, 1, ignore_substitutions=True,
+            cache_manager=manager,
+        )
+    assert manager.events[-1]["status"] == "invalid"

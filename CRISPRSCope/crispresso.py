@@ -1498,6 +1498,58 @@ def _parse_cache_matches_ignore_substitutions(folder_finished_file, ignore_subst
 	return observed_value == expected_value
 
 
+def _parse_crispresso_cache_requirements(output_root, amplicon_name, crispresso_run_folder):
+	amplicon_dir = output_root + ".seq_by_amplicon"
+	allele_fastq = build_stage_filename(
+		stage=STAGE_SPLIT, tag="alleles_all_cells", amplicon=amplicon_name,
+		ext="fq", output_root=amplicon_dir,
+	)
+	return (
+		OutputRequirement(
+			"summary", crispresso_run_folder + ".summ", strategy="sha256",
+			validator="tsv", required_header=("cell", "all_cell_read_count"),
+		),
+		OutputRequirement(
+			"indel_summary", crispresso_run_folder + ".summarize_indels.out",
+			strategy="sha256", validator="tsv", required_header=("cell", "read_count"),
+		),
+		OutputRequirement(
+			"allele_summary", crispresso_run_folder + ".summarize_alleles.out",
+			strategy="sha256", validator="tsv", required_header=("cell", "read_count"),
+		),
+		OutputRequirement(
+			"allele_fastq", allele_fastq, strategy="stat", allow_empty=True,
+		),
+		OutputRequirement(
+			"finished", crispresso_run_folder + ".summ.finished", strategy="sha256",
+		),
+	)
+
+
+def _build_parse_crispresso_cache_record(
+	cache_manager, amplicon_name, amplicon_info, crispresso_run_folder,
+	ignore_substitutions, min_num_reads_per_cell,
+):
+	upstream = cache_manager.load("crispresso_reads", amplicon_name)
+	dependencies = [cache_manager.dependency(upstream)] if upstream is not None else []
+	crispresso_fastq = os.path.join(crispresso_run_folder, "CRISPResso_output.fastq.gz")
+	return cache_manager.new_record(
+		"parse_crispresso",
+		amplicon_name,
+		algorithm_version=1,
+		dependencies=dependencies,
+		inputs={
+			"crispresso_fastq": large_file_fingerprint(crispresso_fastq),
+			"amplicon_sequences": amplicon_info["amp_seqs"],
+			"input_ref_allele_counts": amplicon_info["input_ref_allele_counts"],
+		},
+		parameters={
+			"ignore_substitutions": bool(ignore_substitutions),
+			"min_num_reads_per_cell": int(min_num_reads_per_cell),
+		},
+	)
+
+
 def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_file,crispresso_information,
 								output_root, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, n_processes,num_max_alleles=2,num_references=1,
 								min_num_reads_per_cell=5,min_allele_pct_cutoff=.1,min_allele_count_cutoff=2,
@@ -1555,6 +1607,8 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 	- Skips amplicons with zero aligned reads.
 	"""
 	parse_output_args = []
+	parse_cache_records = {}
+	parse_cache_requirements = {}
 	for name in amplicon_names:
 		if crispresso_information[name]['status'] == 'Completed':
 			crispresso_run_folder = crispresso_information[name]['crispresso_run_folder']
@@ -1562,7 +1616,24 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 			input_ref_allele_counts = amplicon_information[name]['input_ref_allele_counts']
 			folder_finished_file = crispresso_run_folder + ".summ.finished"
 
-			if not _parse_cache_matches_ignore_substitutions(folder_finished_file, ignore_substitutions):
+			cache_hit = False
+			if cache_manager is not None:
+				cache_record = _build_parse_crispresso_cache_record(
+					cache_manager, name, amplicon_information[name],
+					crispresso_run_folder, ignore_substitutions,
+					min_num_reads_per_cell,
+				)
+				requirements = _parse_crispresso_cache_requirements(
+					output_root, name, crispresso_run_folder
+				)
+				cache_hit = cache_manager.evaluate(cache_record, requirements).is_hit
+				if not cache_hit:
+					parse_cache_records[name] = cache_record
+					parse_cache_requirements[name] = requirements
+			elif _parse_cache_matches_ignore_substitutions(folder_finished_file, ignore_substitutions):
+				cache_hit = True
+
+			if not cache_hit:
 				if os.path.isfile(folder_finished_file):
 					logging.info(
 						"Reparsing %s because ignore_substitutions changed to %s",
@@ -1594,6 +1665,12 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 		else:
 			for this_args in parse_output_args:
 				parse_one_crispresso_output(this_args)
+		if cache_manager is not None:
+			for this_args in parse_output_args:
+				name = this_args["amplicon_name"]
+				cache_manager.commit(
+					parse_cache_records[name], parse_cache_requirements[name]
+				)
 	else:
 		logging.info('Finished parsing CRISPResso folders')
 
