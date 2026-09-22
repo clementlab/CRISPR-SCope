@@ -1,8 +1,9 @@
+import os
 from types import SimpleNamespace
 
 import pytest
 
-from CRISPRSCope import amplicon_assignment, fastq_processing
+from CRISPRSCope import amplicon_assignment, crispresso, fastq_processing
 from CRISPRSCope.cache import (
     CacheManager,
     OutputRequirement,
@@ -235,4 +236,113 @@ def test_split_cache_changed_setting_recomputes(tmp_path, monkeypatch):
             10,
             cache_manager=manager,
         )
+    assert manager.events[-1]["status"] == "invalid"
+
+
+def _seed_crispresso_cache(tmp_path, monkeypatch, *, alleles=False):
+    output_root = str(tmp_path / "run")
+    base_dir = tmp_path / "run.crispresso"
+    run_dir = tmp_path / ("run.crispresso.filtered" if alleles else "run.crispresso")
+    run_dir.mkdir(parents=True)
+    amp_dir = tmp_path / "run.seq_by_amplicon"
+    amp_dir.mkdir()
+    if alleles:
+        inputs = [amp_dir / "04_alleles_qc_cells.ampA.fq.gz"]
+    else:
+        inputs = [
+            amp_dir / "03_reads_all_cells.ampA.r1.fq.gz",
+            amp_dir / "03_reads_all_cells.ampA.r2.fq.gz",
+        ]
+    for path in inputs:
+        path.write_text("fastq\n")
+    information = {
+        "ampA": {
+            "name": "ampA",
+            "aln_count": "1",
+            "reads_r1_file": str(inputs[0]),
+            "reads_r2_file": str(inputs[-1]),
+            "amp_seqs": "ACGT",
+            "guide_seq": "AC",
+        }
+    }
+    folder = run_dir / "CRISPResso_on_ampA"
+    folder.mkdir()
+    (folder / "CRISPResso2_info.json").write_text("{}\n")
+    (folder / "CRISPResso_output.fastq.gz").write_text("fastq\n")
+    finished = run_dir / "ampA.finished"
+    finished.write_text("")
+    monkeypatch.setattr(crispresso, "tool_identity", _tool)
+    manager = CacheManager(output_root)
+    record = crispresso._build_crispresso_cache_record(
+        manager, "ampA", information["ampA"], False, alleles, [str(path) for path in inputs]
+    )
+    manager.commit(record, crispresso._crispresso_cache_requirements(str(finished), str(folder)))
+    return manager, information, output_root, base_dir, folder
+
+
+@pytest.mark.parametrize("alleles", [False, True])
+def test_crispresso_per_amplicon_cache_hits_without_running(tmp_path, monkeypatch, alleles):
+    manager, information, output_root, base_dir, folder = _seed_crispresso_cache(
+        tmp_path, monkeypatch, alleles=alleles
+    )
+    monkeypatch.setattr(
+        crispresso,
+        "run_crispresso_command",
+        lambda _job: (_ for _ in ()).throw(AssertionError("cache miss")),
+    )
+    if alleles:
+        monkeypatch.setattr(
+            crispresso,
+            "_decompressed_fastq_sha256",
+            lambda _path: (_ for _ in ()).throw(AssertionError("large file was hashed")),
+        )
+
+    result = crispresso.run_crispresso_commands(
+        ["ampA"], information, output_root, str(base_dir), False, 1,
+        alleles=alleles, cache_manager=manager,
+    )
+    assert result["ampA"]["status"] == "Completed"
+    assert folder.exists()
+    assert manager.events[-1]["status"] == "hit"
+
+
+def test_crispresso_changed_guide_clears_and_reruns_exact_amplicon(tmp_path, monkeypatch):
+    manager, information, output_root, base_dir, folder = _seed_crispresso_cache(
+        tmp_path, monkeypatch, alleles=False
+    )
+    stale = folder / "stale.txt"
+    stale.write_text("stale\n")
+    information["ampA"]["guide_seq"] = "CHANGED"
+
+    class Pool:
+        def __init__(self, *_args):
+            pass
+
+        def map_async(self, function, jobs):
+            values = []
+            for job in jobs:
+                assert "--no_rerun" not in job["args"]
+                assert not stale.exists()
+                os.makedirs(job["crispresso_run_folder"], exist_ok=True)
+                with open(os.path.join(job["crispresso_run_folder"], "CRISPResso2_info.json"), "w") as handle:
+                    handle.write("{}\n")
+                with open(os.path.join(job["crispresso_run_folder"], "CRISPResso_output.fastq.gz"), "w") as handle:
+                    handle.write("fastq\n")
+                with open(job["finished_file"], "w"):
+                    pass
+                values.append({"returncode": 0, "error": None, "command": job["command"]})
+            return SimpleNamespace(get=lambda *_args: values)
+
+        def close(self):
+            pass
+
+        def join(self):
+            pass
+
+    monkeypatch.setattr(crispresso.mp, "Pool", Pool)
+    result = crispresso.run_crispresso_commands(
+        ["ampA"], information, output_root, str(base_dir), False, 1,
+        alleles=False, cache_manager=manager,
+    )
+    assert result["ampA"]["status"] == "Completed"
     assert manager.events[-1]["status"] == "invalid"

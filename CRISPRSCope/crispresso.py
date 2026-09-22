@@ -38,6 +38,12 @@ from scipy.stats import multinomial
 from upsetplot import UpSet
 
 from CRISPRSCope import __version__
+from CRISPRSCope.cache import (
+	OutputRequirement,
+	large_file_fingerprint,
+	safe_remove_owned,
+	tool_identity,
+)
 from CRISPRSCope.io_utils import open_text_maybe_gzip
 from CRISPRSCope.output_artifacts import OutputContext, OutputManifest
 
@@ -445,6 +451,51 @@ def _filtered_allele_fastq_path(output_root, amplicon_name):
 	)
 
 
+def _crispresso_cache_requirements(finished_file, crispresso_run_folder):
+	return (
+		OutputRequirement(
+			"finished", finished_file, strategy="sha256", allow_empty=True,
+		),
+		OutputRequirement(
+			"crispresso_info",
+			os.path.join(crispresso_run_folder, "CRISPResso2_info.json"),
+			strategy="sha256", validator="json",
+		),
+		OutputRequirement(
+			"crispresso_fastq",
+			os.path.join(crispresso_run_folder, "CRISPResso_output.fastq.gz"),
+			strategy="stat",
+		),
+	)
+
+
+def _build_crispresso_cache_record(
+	cache_manager, amplicon_name, amplicon_info, suppress_sub_crispresso_plots,
+	alleles, input_paths,
+):
+	stage = "crispresso_filtered" if alleles else "crispresso_reads"
+	upstream_stage = "filter_selected" if alleles else "split_reads"
+	upstream_scope = amplicon_name if alleles else "run"
+	upstream = cache_manager.load(upstream_stage, upstream_scope)
+	dependencies = [cache_manager.dependency(upstream)] if upstream is not None else []
+	return cache_manager.new_record(
+		stage,
+		amplicon_name,
+		algorithm_version=1,
+		dependencies=dependencies,
+		inputs={
+			"fastqs": [large_file_fingerprint(path) for path in input_paths],
+			"amplicon_sequences": amplicon_info["amp_seqs"],
+			"guide_sequence": _normalize_optional_guide(amplicon_info.get("guide_seq", "")),
+		},
+		parameters={
+			"mode": "filtered_alleles" if alleles else "reads",
+			"suppress_sub_crispresso_plots": bool(suppress_sub_crispresso_plots),
+		},
+		tools={"CRISPResso": tool_identity(("CRISPResso", "--version"))},
+	)
+
+
 def run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles, cache_manager=None):
 	"""
 	Generate and execute CRISPResso2 commands for each amplicon.
@@ -508,13 +559,13 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 
 	cached_information = {}
 	current_allele_input_hashes = {}
-	if alleles:
+	if alleles and cache_manager is None:
 		for amplicon_name in amplicon_names:
 			allele_input = _filtered_allele_fastq_path(output_root, amplicon_name)
 			if allele_input and os.path.isfile(allele_input):
 				current_allele_input_hashes[amplicon_name] = _decompressed_fastq_sha256(allele_input)
 
-	if os.path.isfile(info_file):
+	if os.path.isfile(info_file) and cache_manager is None:
 		with open(info_file,'r') as fin:
 			head = fin.readline().strip()
 			head_els = head.split("\t")
@@ -561,6 +612,8 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 
 	crispresso_commands = []
 	crispresso_information = {}
+	cache_records = {}
+	cache_requirements = {}
 
 	not_run_count = 0
 	finished_count = 0
@@ -583,6 +636,19 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 			crispresso_information[amplicon_name]['log_file'] = 'NA'
 			crispresso_information[amplicon_name]['crispresso_run_folder'] = 'NA'
 			not_run_count += 1
+			if cache_manager is not None:
+				stage = "crispresso_filtered" if alleles else "crispresso_reads"
+				skip_record = cache_manager.new_record(
+					stage, amplicon_name, algorithm_version=1,
+					inputs={"aln_count": "0"},
+					parameters={"mode": "filtered_alleles" if alleles else "reads"},
+				)
+				decision = cache_manager.evaluate(skip_record, ())
+				if not decision.is_hit:
+					cache_manager.commit(
+						skip_record, (),
+						result={"status": "skipped", "reason": "zero_aligned_reads"},
+					)
 		else:
 
 			#print(f"Running on {amplicon_name}\n{amplicon_information[amplicon_name]}\n")
@@ -654,13 +720,12 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 
 			if suppress_sub_crispresso_plots:
 				crispresso_args.extend(["--suppress_report", "--suppress_plots"])
-			crispresso_args.extend([
+				crispresso_args.extend([
 				"-o", crispresso_dir,
 				"-n", amplicon_name,
 				"-w", "2",
 				"--fastq_output",
-				"--no_rerun",
-				"--exclude_bp_from_left", "0",
+					"--exclude_bp_from_left", "0",
 				"--exclude_bp_from_right", "0",
 			])
 			if not alleles:
@@ -673,7 +738,30 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 			crispresso_information[amplicon_name]['crispresso_run_folder'] = crispresso_run_folder
 
 			crispresso_info_file = os.path.join(crispresso_run_folder, 'CRISPResso2_info.json')
-			if alleles and (os.path.isfile(finished_file) or os.path.isdir(crispresso_run_folder)):
+			if cache_manager is not None:
+				input_paths = [amp_filename] if alleles else [amp_filename_r1, amp_filename_r2]
+				cache_record = _build_crispresso_cache_record(
+					cache_manager, amplicon_name, amplicon_information[amplicon_name],
+					suppress_sub_crispresso_plots, alleles, input_paths,
+				)
+				requirements = _crispresso_cache_requirements(finished_file, crispresso_run_folder)
+				decision = cache_manager.evaluate(cache_record, requirements)
+				if decision.is_hit:
+					finished_count += 1
+					crispresso_information[amplicon_name]['status'] = 'Completed'
+					crispresso_information[amplicon_name]['crispresso_result'] = 'Completed'
+					continue
+				cache_records[amplicon_name] = cache_record
+				cache_requirements[amplicon_name] = requirements
+				safe_remove_owned(
+					finished_file, allowed_root=crispresso_dir,
+					expected_name=amplicon_name + ".finished",
+				)
+				safe_remove_owned(
+					crispresso_run_folder, allowed_root=crispresso_dir,
+					expected_name="CRISPResso_on_" + amplicon_name,
+				)
+			elif alleles and (os.path.isfile(finished_file) or os.path.isdir(crispresso_run_folder)):
 				cached_hash = cached_information.get(amplicon_name, {}).get('input_sha256')
 				current_hash = current_allele_input_hashes.get(amplicon_name)
 				if not current_hash or cached_hash != current_hash:
@@ -684,13 +772,14 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					safe_remove(finished_file, silent=True)
 					if os.path.isdir(crispresso_run_folder):
 						shutil.rmtree(crispresso_run_folder)
-			if os.path.isfile(finished_file) and os.path.isfile(crispresso_info_file):
+			if cache_manager is None and os.path.isfile(finished_file) and os.path.isfile(crispresso_info_file):
 				finished_count += 1
 				continue
 			else:
 				if os.path.isfile(finished_file) and not os.path.isfile(crispresso_info_file):
 					os.remove(finished_file)
 				crispresso_commands.append({
+					'amplicon_name': amplicon_name,
 					'args': crispresso_args,
 					'command': crispresso_cmd,
 					'log_file': log_file,
@@ -704,6 +793,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 
 	logging.info('Got ' + str(len(crispresso_commands)) + ' CRISPResso commands')
 
+	command_errors = []
 	if len(crispresso_commands) > 0:
 		# start processes
 		logging.info("Running on "+ str(n_processes) + " processes..")
@@ -711,12 +801,13 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 		result = pool.map_async(run_crispresso_command, crispresso_commands).get(threading.TIMEOUT_MAX)
 		pool.close()
 		pool.join()
-		for completed_job in result:
+		for job, completed_job in zip(crispresso_commands, result):
 			if completed_job.get('error'):
-				_raise_command_error(
-					completed_job.get('command'),
-					completed_job.get('returncode'),
-					context=completed_job.get('error'),
+				command_errors.append(completed_job)
+			elif cache_manager is not None:
+				amplicon_name = job['amplicon_name']
+				cache_manager.commit(
+					cache_records[amplicon_name], cache_requirements[amplicon_name]
 				)
 
 	for amplicon_name in amplicon_names:
@@ -757,6 +848,12 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 		fout.write("\t".join(header_els)+"\n")
 		for amplicon_name in amplicon_names:
 			fout.write("\t".join([crispresso_information[amplicon_name][x] for x in header_els])+"\n")
+	if command_errors:
+		completed_job = command_errors[0]
+		_raise_command_error(
+			completed_job.get('command'), completed_job.get('returncode'),
+			context=completed_job.get('error'),
+		)
 	return crispresso_information
 
 
