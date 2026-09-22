@@ -29,3 +29,7 @@ python generate_fixture.py --record-golden run --overwrite
 
 Ordinary test runs exclude this fixture. Run it explicitly with
 `pytest -m integration`.
+
+The fixture uses `cache_mode=auto`. The integration test performs a cold run
+followed by an identical warm run and verifies that all managed processing
+stages hit their records while the final deliverables are regenerated.

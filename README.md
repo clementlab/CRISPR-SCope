@@ -142,6 +142,7 @@ amplicons	inputs/amplicons.tsv
 bowtie2_index	references/hg38/hg38
 output_root	results/demo_run
 processes	8
+cache_mode	auto
 allowBarcodeMismatches	True
 keep_intermediate_files	False
 ignore_substitutions	False
@@ -238,6 +239,7 @@ You may also use `genome` instead of `bowtie2_index`; internally the pipeline re
 | --- | --- | --- |
 | `output_root` | settings file path | Prefix used for generated outputs. |
 | `processes` | all available CPUs | Number of processes to use. |
+| `cache_mode` | `auto` | Processing-stage cache policy: `auto` validates and reuses records, `refresh` recomputes and replaces them, and `disabled` recomputes without reading or writing records. |
 | `allowBarcodeMismatches` | off | Enables single-mismatch barcode rescue. |
 | `keep_intermediate_files` | `False` | Keeps intermediate files instead of cleaning them up. |
 | `ignore_substitutions` | `False` | Ignores substitution annotations when parsing CRISPResso read-alignment output and summarizing downstream editing calls. |
@@ -357,7 +359,38 @@ When `write_output_manifest=True`, CRISPRSCope also writes
 `results/demo_run.outputManifest.json`. This compact diagnostic inventory
 records each declared final artifact's path and lifecycle status, linked data
 artifacts, intermediate-directory summaries, and the active stage/error if a
-run fails.
+run fails. Manifest schema 2 also records the cache mode, decision summary,
+and ordered per-stage cache events.
+
+## Processing Cache and Resume Behavior
+
+CRISPRSCope stores versioned cache records under `<output_root>.cache/` for
+parse/alignment, read splitting, both CRISPResso passes, CRISPResso parsing,
+and selected-cell FASTQ filtering. CRISPResso-related records are independent
+per amplicon, so a missing or changed output reruns only that amplicon and its
+dependents. Aggregate tables, resampling analyses, plots, reports, and `.h5ad`
+exports are regenerated on every run.
+
+`cache_mode=auto` is the default. Use `cache_mode=refresh` to force every
+managed stage to recompute and replace its record. Use `cache_mode=disabled`
+to recompute without consulting or changing cache records. Old `.finished`,
+`.summ.finished`, split TSV, and barcode-digest files remain useful diagnostics
+but cannot create a cache hit without a current JSON record. Runs created before
+this cache format therefore incur one conservative recomputation.
+
+Cache validation avoids payload-size work for sequencing artifacts: FASTQs,
+BAMs, Bowtie2 indexes, and large CRISPResso outputs use resolved path, byte
+size, and nanosecond modification time. BAMs additionally undergo
+`samtools quickcheck`, and gzipped FASTQs receive a gzip magic-byte check.
+Small control and summary files use SHA-256. Consequently, an external process
+that changes a large file while preserving both its size and modification time
+can evade validation; run with `cache_mode=refresh` when that is possible.
+
+Only one process may use a given output root at a time. CRISPRSCope acquires a
+non-blocking `<output_root>.cache.lock`; contention fails immediately and does
+not replace the active run's manifest. Cache decisions are also written to the
+normal log as `CACHE HIT`, `CACHE MISS`, `CACHE INVALID`, `CACHE REFRESH`, or
+`CACHE DISABLED` lines.
 
 When `write_editing_rate_depth_stability=True`, the additional detailed outputs are:
 
