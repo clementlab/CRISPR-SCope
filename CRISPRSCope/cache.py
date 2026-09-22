@@ -185,6 +185,13 @@ def _validate_output(requirement: OutputRequirement) -> str | None:
                 header = tuple(handle.readline().rstrip("\n").split("\t"))
             if requirement.required_header and header[: len(requirement.required_header)] != requirement.required_header:
                 return "output_invalid_header"
+        elif requirement.validator == "cell_counts":
+            with open(path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    fields = line.rstrip("\n").split("\t")
+                    if len(fields) != 2 or not fields[0]:
+                        return "output_invalid_cell_counts"
+                    int(fields[1])
         elif requirement.validator is not None:
             raise ValueError(f"Unknown output validator: {requirement.validator}")
     except (OSError, UnicodeError, json.JSONDecodeError):
