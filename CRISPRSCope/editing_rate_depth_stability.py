@@ -11,6 +11,7 @@ from .editing_rate_common import (
     DEPTH_STABILITY_COLUMNS,
     EditingRateDepthStabilityConfig,
     _percentile_interval,
+    categorical_mod_pct_to_cell_edit_pct,
 )
 
 def _nested_subsample_means(
@@ -239,9 +240,13 @@ def compute_editing_rate_depth_stability(
             {
                 "amplicon": amplicon,
                 "amplicon_index": amplicon_index,
-                "mod_values": pd.to_numeric(
-                    ordered_summary[mod_column], errors="coerce"
-                ).to_numpy(dtype=float),
+                "mod_values": categorical_mod_pct_to_cell_edit_pct(
+                    pd.to_numeric(
+                        ordered_summary[mod_column], errors="coerce"
+                    ).to_numpy(dtype=float),
+                    amplicon=amplicon,
+                    barcodes=ordered_index,
+                ),
                 "count_values": pd.to_numeric(
                     ordered_summary[count_column], errors="coerce"
                 ).to_numpy(dtype=float),

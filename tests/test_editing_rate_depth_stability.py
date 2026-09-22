@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pandas.testing as pdt
+import pytest
 
 import CRISPRSCope.editing_rate_ci as editing_rate_ci_module
 
@@ -35,9 +36,9 @@ def _example_inputs():
     editing_summary = pd.DataFrame(
         {
             "totCount.ampA": [10, 10, 10, 10, 1, 10],
-            "modPct.ampA": [0.0, 20.0, 40.0, 60.0, 100.0, np.nan],
+            "modPct.ampA": [0.0, 50.0, 100.0, 50.0, 100.0, np.nan],
             "totCount.ampB": [10, 10, 10, 10, 10, 10],
-            "modPct.ampB": [100.0, 80.0, 60.0, 40.0, 20.0, 0.0],
+            "modPct.ampB": [100.0, 100.0, 50.0, 50.0, 0.0, 0.0],
         },
         index=["cell4", "cell2", "cell6", "cell1", "cell5", "cell3"],
     )
@@ -128,6 +129,33 @@ def test_percentages_use_cohort_sizes_and_append_full_reference():
         "subsample_interval_upper_pct",
     ]
     assert duplicate_depth_rows[summary_columns].nunique().eq(1).all()
+
+
+def test_depth_stability_uses_categorical_edited_cell_rates():
+    editing_summary = pd.DataFrame(
+        {"totCount.ampA": [10, 10, 10, 10], "modPct.ampA": [0.0, 50.0, 100.0, np.nan]},
+        index=["cell1", "cell2", "cell3", "cell4"],
+    )
+    quality_scores = pd.DataFrame(
+        {"Color": ["HQ_HI", "HQ_HI", "LQ_HI", "LQ_HI"]},
+        index=editing_summary.index,
+    )
+
+    results = compute_editing_rate_depth_stability(
+        editing_summary,
+        quality_scores,
+        ["HQ_HI"],
+        1,
+        EditingRateDepthStabilityConfig(enabled=True, iterations=100, percentages=(50.0,)),
+    )
+    all_reference = results.loc[
+        (results["amplicon"] == "ampA")
+        & (results["cohort"] == "all")
+        & (results["sample_percent"] == 100.0)
+    ].iloc[0]
+
+    assert all_reference["eligible_n_cells"] == 3
+    assert all_reference["full_estimate_pct"] == pytest.approx(200.0 / 3.0)
 
 
 def test_hq_ordering_takes_precedence_and_missing_hq_is_last():

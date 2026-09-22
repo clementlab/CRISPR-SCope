@@ -39,9 +39,12 @@ no include_* setting is supplied, the pipeline defaults to HQ_HI. Every other
 eligible cell, including an eligible cell without an amplicon-score row, belongs
 to the OutGroup.
 
-Unless otherwise noted, an editing-rate estimate is the arithmetic mean of
-the eligible cells' per-cell modification percentages. Eligibility, and hence
-the cell count, can differ by amplicon.
+Unless otherwise noted, an edited-cell-rate estimate is the percentage of
+eligible cells with at least one edited allele. Non-pseudobulk `modPct` calls
+are categorical: 0 (WT/WT) maps to unedited, while 50 (WT/Mut) and 100
+(Mut/Mut) each map to edited. Missing calls are excluded; any other finite
+value is rejected. Eligibility, and hence the cell count, can differ by
+amplicon.
 
 
 2. Supported-amplicon breadth score
@@ -122,12 +125,12 @@ or a biological cell-state call.
 
 Goal
 ~~~~
-Report within-run uncertainty for the mean first-pass editing rate in the
+Report within-run uncertainty for the first-pass edited-cell rate in the
 AllCells and InGroup cohorts.
 
 Method
 ~~~~~~
-For each amplicon, calculate the mean modification percentage in AllCells and
+For each amplicon, calculate the percentage of edited cells in AllCells and
 in eligible InGroup cells. When a cohort has at least two eligible
 cells, repeatedly draw a sample the same size as that cohort WITH REPLACEMENT
 from its eligible cells and calculate the sample mean. The lower and upper
@@ -137,7 +140,7 @@ alpha = 1 - confidence level.
 The workflow also produces bootstrap intervals for the InGroup-minus-AllCells
 effect. Each bootstrap replicate separately resamples the InGroup and OutGroup
 eligible cells, with replacement and at their observed sizes,
-then calculates:
+then calculates the difference in edited-cell rates:
 
     InGroup mean - AllCells mean
 
@@ -168,7 +171,7 @@ confidence intervals across animals, samples, or other biological replicates.
 
 Goal
 ~~~~
-Test whether the observed InGroup editing rate differs from what would be
+Test whether the observed InGroup edited-cell rate differs from what would be
 expected if the same number of eligible cells were assigned to the InGroup at
 random.
 
@@ -207,9 +210,9 @@ includes every estimable amplicon regardless of the coverage-controlled
 significance threshold.
 
 The observed-centered swarm is another view of the same draws. It plots each
-permuted InGroup-sized subset mean relative to the observed InGroup mean for
-its amplicon, in percentage points. Its vertical zero line identifies the
-observed InGroup editing rate for every amplicon.
+permuted InGroup-sized subset edited-cell rate relative to the observed
+InGroup rate for its amplicon, in percentage points. Its vertical zero line
+identifies the observed InGroup edited-cell rate for every amplicon.
 
 This test controls only the InGroup size. It does not control for
 per-amplicon read-depth differences between cohorts.
@@ -298,7 +301,7 @@ figure remain available.
 
 Goal
 ~~~~
-Measure how estimated editing rates change when only a fraction of the
+Measure how estimated edited-cell rates change when only a fraction of the
 eligible cells are retained.
 
 Method

@@ -68,11 +68,11 @@ def test_unconditional_distribution_matches_reported_test_and_selected_group_siz
 
 
 def test_unconditional_distribution_samples_without_replacement():
-    editing_summary, quality_scores = _input_data([0.0, 1.0, 2.0, 4.0], 2)
+    editing_summary, quality_scores = _input_data([0.0, 0.0, 100.0, 100.0], 2)
 
     _, _, simulations = _compute(editing_summary, quality_scores, iterations=500)
 
-    possible_without_replacement_means = {0.5, 1.0, 1.5, 2.0, 2.5, 3.0}
+    possible_without_replacement_means = {0.0, 50.0, 100.0}
     assert set(simulations["permuted_selected_estimate_pct"]).issubset(
         possible_without_replacement_means
     )
@@ -83,7 +83,7 @@ def test_unconditional_distribution_handles_invariant_and_insufficient_groups():
     results, summaries, simulations = _compute(invariant_summary, invariant_scores)
     assert results.iloc[0]["permutation_p_value"] == 1.0
     assert summaries.iloc[0]["status"] == "invariant_permutation_distribution"
-    assert simulations["permuted_selected_estimate_pct"].eq(50.0).all()
+    assert simulations["permuted_selected_estimate_pct"].eq(100.0).all()
 
     one_cell_summary, one_cell_scores = _input_data([100.0, 0.0, 0.0], 1)
     results, summaries, simulations = _compute(one_cell_summary, one_cell_scores)

@@ -1,9 +1,9 @@
 {
   "hashes": {
     "amplicon_score": "88ff295575c088b24ebc2b2c10ef7765d37072617ef9c50a135af69b7493db0f",
-    "editing_rate_ci": "a56d5bcd54d43a6f94470aa42381a90be2ebdb10fcc304167106d50f42a9a404",
+    "editing_rate_ci": "1b9dd81b61322f4af0961f9d0399bc4bafdc83922a8e8026ffa5f9663b334c39",
     "editing_summary": "739f21d3e1092d4b6952a01d01b0fdbc6d0c3417f346700cf71cdd4cfe225ee7",
-    "unconditional_permutation": "5f2357ea6a69ffd48accb7bb4c269222c72d2d683aed3b7ce9064cd2e2434586",
+    "unconditional_permutation": "50c8b66ff503cac4dad824cff3f77110d23c19ac26e19b482f34196a596b58cf",
     "valid_amplicons": "adcc86e2fe46c30dd37def1794c852ae48edd8e7658d62cf37ebd669996c35d0"
   },
   "invariants": {

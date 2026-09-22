@@ -31,7 +31,7 @@ def _example_inputs():
     return editing_summary, quality_scores
 
 
-def test_compute_uses_cell_weighted_rates_and_configured_hq_codes():
+def test_compute_uses_edited_cell_rates_and_configured_hq_codes():
     editing_summary, quality_scores = _example_inputs()
     config = EditingRateCIConfig(enabled=True, bootstrap_iterations=500, seed=7)
 
@@ -46,16 +46,37 @@ def test_compute_uses_cell_weighted_rates_and_configured_hq_codes():
 
     assert result.loc["ampA", "all_cells_n_cells"] == 3
     assert result.loc["ampA", "in_group_n_cells"] == 2
-    assert result.loc["ampA", "all_cells_estimate_pct"] == 50.0
-    assert result.loc["ampA", "in_group_estimate_pct"] == 75.0
-    assert result.loc["ampA", "in_group_minus_all_cells_pct"] == 25.0
+    assert result.loc["ampA", "all_cells_estimate_pct"] == pytest.approx(200.0 / 3.0)
+    assert result.loc["ampA", "in_group_estimate_pct"] == 100.0
+    assert result.loc["ampA", "in_group_minus_all_cells_pct"] == pytest.approx(100.0 / 3.0)
     assert result.loc["ampA", "out_group_estimate_pct"] == 0.0
     assert result.loc["ampA", "out_group_n_cells"] == 1
-    assert result.loc["ampA", "in_group_minus_out_group_pct"] == 75.0
+    assert result.loc["ampA", "in_group_minus_out_group_pct"] == 100.0
     assert not any("hq" in column or "non_hq" in column for column in result.columns)
     assert np.isnan(result.loc["ampA", "permutation_p_value"])
     assert result.loc["ampA", "status"] == "insufficient_out_group_cells"
     assert 0 <= result.loc["ampA", "all_cells_ci_lower_pct"] <= result.loc["ampA", "all_cells_ci_upper_pct"] <= 100
+
+
+@pytest.mark.parametrize("invalid_value", [25.0, 75.0])
+def test_noncanonical_mod_pct_is_rejected_with_amplicon_and_barcode(invalid_value):
+    editing_summary = pd.DataFrame(
+        {"totCount.ampA": [10], "modPct.ampA": [invalid_value]},
+        index=["cell_invalid"],
+    )
+    quality_scores = pd.DataFrame({"Color": ["HQ_HI"]}, index=editing_summary.index)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"ampA.*cell_invalid.*{invalid_value}",
+    ):
+        compute_editing_rate_confidence_intervals(
+            editing_summary,
+            quality_scores,
+            ["HQ_HI"],
+            1,
+            EditingRateCIConfig(enabled=True, bootstrap_iterations=200),
+        )
 
 
 def test_parallel_and_serial_results_are_identical():

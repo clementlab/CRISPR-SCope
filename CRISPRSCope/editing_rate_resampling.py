@@ -13,6 +13,7 @@ from .editing_rate_common import (
     UNCONDITIONAL_PERMUTATION_SUMMARY_COLUMNS,
     _percentile_interval,
     _point_estimate,
+    categorical_mod_pct_to_cell_edit_pct,
 )
 
 def _bootstrap_means(
@@ -539,7 +540,11 @@ def _compute_editing_rate_resampling_analyses(
             {
                 "amplicon": amplicon,
                 "amplicon_index": amplicon_index,
-                "mod_values": pd.to_numeric(editing_summary[mod_column], errors="coerce").to_numpy(dtype=float),
+                "mod_values": categorical_mod_pct_to_cell_edit_pct(
+                    pd.to_numeric(editing_summary[mod_column], errors="coerce").to_numpy(dtype=float),
+                    amplicon=amplicon,
+                    barcodes=editing_summary.index,
+                ),
                 "count_values": pd.to_numeric(editing_summary[count_column], errors="coerce").to_numpy(dtype=float),
                 "hq_mask": hq_mask,
                 "min_reads": min_reads_per_amplicon_per_cell,

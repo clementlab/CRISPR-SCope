@@ -130,32 +130,32 @@ ARTIFACT_SPECS: tuple[OutputSpec, ...] = (
     OutputSpec(
         "editing_rate_confidence_intervals_plot", ".10_EditingRateConfidenceIntervals", "plot", ("png", "pdf"),
         "Amplicon editing-rate confidence intervals",
-        "Pointwise bootstrap confidence intervals for all analyzable and configured analysis-group cells among amplicons with a coverage-adjusted BH p-value at or below 0.05.",
-        (("Editing-rate confidence intervals", "editing_rate_ci"),), True,
+        "Pointwise bootstrap confidence intervals for the percentage of eligible cells with at least one edited allele among amplicons with a coverage-adjusted BH p-value at or below 0.05.",
+        (("Edited-cell-rate confidence intervals", "editing_rate_ci"),), True,
     ),
     OutputSpec(
         "editing_rate_coverage_adjusted_effects_plot", ".11_EditingRateCoverageAdjustedEffects", "plot", ("png", "pdf"),
         "Raw vs. read-depth adjusted editing rate",
-        "Observed InGroup-versus-OutGroup editing-rate differences before and after read-depth adjustment.",
-        (("Editing-rate confidence intervals", "editing_rate_ci"),), True,
+        "Observed InGroup-versus-OutGroup edited-cell-rate differences before and after read-depth adjustment.",
+        (("Edited-cell-rate confidence intervals", "editing_rate_ci"),), True,
     ),
     OutputSpec(
         "editing_rate_unconditional_permutation_plot", ".12_EditingRateUnconditionalPermutation", "plot", ("png", "pdf"),
         "Unconditional editing-rate permutation distribution",
-        "Permutation distribution of InGroup-sized subset means relative to the observed InGroup mean.",
+        "Permutation distribution of InGroup-sized subset edited-cell rates relative to the observed InGroup rate.",
         (("Unconditional permutation summary", "editing_rate_unconditional_permutation"), ("Unconditional permutation simulations", "editing_rate_unconditional_simulations")), True,
     ),
     OutputSpec(
         "editing_rate_observed_centered_permutation_swarm_plot", ".13_EditingRateObservedCenteredPermutationSwarm", "plot", ("png", "pdf"),
         "Observed-centered unconditional permutation swarm",
-        "Simulated InGroup-sized subset means relative to the observed InGroup editing rate for each amplicon; zero marks the observed rate.",
+        "Simulated InGroup-sized subset edited-cell rates relative to the observed InGroup rate for each amplicon; zero marks the observed rate.",
         (("Unconditional permutation summary", "editing_rate_unconditional_permutation"), ("Unconditional permutation simulations", "editing_rate_unconditional_simulations")), True,
     ),
     OutputSpec(
         "editing_rate_depth_stability_plot", ".14_EditingRateDepthStability", "plot", ("png", "pdf"),
         "Editing-rate cell-depth stability",
-        "Finite-cohort downsampling stability bands for all analyzable and configured analysis-group cells. Bands show sensitivity to retained cell depth within this run, not uncertainty across biological replicates.",
-        (("Editing-rate depth stability", "editing_rate_depth_stability"),), True,
+        "Finite-cohort downsampling stability bands for the percentage of analyzable and configured analysis-group cells with at least one edited allele. Bands show sensitivity to retained cell depth within this run, not uncertainty across biological replicates.",
+        (("Edited-cell-rate depth stability", "editing_rate_depth_stability"),), True,
     ),
 )
 

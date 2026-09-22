@@ -170,6 +170,37 @@ def test_coverage_adjustment_detects_within_bin_group_effect_for_configured_code
     assert result["coverage_adjusted_within_bin_coverage_difference_reads"] == 2.0
 
 
+def test_categorical_heterozygous_calls_count_as_edited_cells():
+    editing_summary = pd.DataFrame(
+        {
+            "totCount.ampA": [10, 10, 10, 10],
+            "modPct.ampA": [50.0, 100.0, 0.0, 0.0],
+        },
+        index=["cell1", "cell2", "cell3", "cell4"],
+    )
+    quality_scores = pd.DataFrame(
+        {"Color": ["HQ_HI", "HQ_HI", "LQ_HI", "LQ_HI"]},
+        index=editing_summary.index,
+    )
+
+    result = compute_editing_rate_confidence_intervals(
+        editing_summary,
+        quality_scores,
+        ["HQ_HI"],
+        1,
+        EditingRateCIConfig(
+            bootstrap_iterations=200,
+            permutation_iterations=200,
+            seed=11,
+        ),
+    ).iloc[0]
+
+    assert result["all_cells_estimate_pct"] == 50.0
+    assert result["in_group_estimate_pct"] == 100.0
+    assert result["out_group_estimate_pct"] == 0.0
+    assert result["coverage_adjusted_in_group_minus_out_group_pct"] == 100.0
+
+
 def test_coverage_adjustment_reports_absent_common_support():
     editing_summary = pd.DataFrame(
         {

@@ -77,7 +77,7 @@ def test_cli_writer_creates_table_plots_and_report_links(tmp_path):
     )
     assert observed_centered_plot.datas == permutation_plot.datas
     assert all(
-        plot.datas == [("Editing-rate confidence intervals", str(table_path))]
+        plot.datas == [("Edited-cell-rate confidence intervals", str(table_path))]
         for plot in plot_objects
         if plot not in (permutation_plot, observed_centered_plot)
     )
@@ -93,12 +93,12 @@ def test_cli_writer_creates_table_plots_and_report_links(tmp_path):
     )
 
     report_text = report_path.read_text()
-    assert "Amplicon editing-rate confidence intervals" in report_text
+    assert "Amplicon edited-cell-rate confidence intervals" in report_text
     assert "run.editingRateConfidenceIntervals.txt" in report_text
-    assert "Unconditional editing-rate permutation distribution" in report_text
+    assert "Unconditional edited-cell-rate permutation distribution" in report_text
     assert "run.editingRateUnconditionalPermutation.txt" in report_text
     assert "run.editingRateUnconditionalPermutationSimulations.txt" in report_text
-    assert "Observed-centered unconditional permutation swarm" in report_text
+    assert "Observed-centered edited-cell permutation swarm" in report_text
 
 
 def test_cli_writer_keeps_table_and_comparison_plot_without_significance(tmp_path):
@@ -147,7 +147,7 @@ def test_depth_stability_writer_creates_table_plot_and_report_link(tmp_path):
     editing_summary = pd.DataFrame(
         {
             "totCount.ampA": [10, 10, 10, 10],
-            "modPct.ampA": [0.0, 25.0, 75.0, 100.0],
+            "modPct.ampA": [0.0, 50.0, 50.0, 100.0],
         },
         index=["cell1", "cell2", "cell3", "cell4"],
     )
@@ -180,7 +180,7 @@ def test_depth_stability_writer_creates_table_plot_and_report_link(tmp_path):
     assert not (tmp_path / "run.editingRateFixedCellDepthStability.txt").exists()
     assert len(plot_objects) == 1
     assert plot_objects[0].datas == [
-        ("Editing-rate depth stability", str(table_path))
+        ("Edited-cell-rate depth stability", str(table_path))
     ]
 
     table = pd.read_csv(table_path, sep="\t")
@@ -197,7 +197,7 @@ def test_depth_stability_writer_creates_table_plot_and_report_link(tmp_path):
     )
 
     report_text = report_path.read_text()
-    assert "Editing-rate cell-depth stability" in report_text
+    assert "Edited-cell-rate cell-depth stability" in report_text
     assert "run.editingRateDepthStability.txt" in report_text
     assert "Relative editing-rate cell-depth stability" not in report_text
     assert "Editing-rate stability at fixed cell counts" not in report_text

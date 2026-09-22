@@ -238,9 +238,9 @@ def _write_coverage_adjusted_effect_plot(
     ax.set_yticks(y_positions)
     ax.set_yticklabels(plotted["amplicon"])
     ax.invert_yaxis()
-    ax.set_xlabel("InGroup minus OutGroup (percentage points)")
+    ax.set_xlabel("InGroup minus OutGroup edited-cell rate (percentage points)")
     ax.set_ylabel("Amplicon")
-    fig.suptitle("Raw and Coverage-Adjusted Editing-Rate Effects")
+    fig.suptitle("Raw and Coverage-Adjusted Edited-Cell-Rate Effects")
     if legend_handles:
         ax.legend(
             [item[0] for item in legend_handles],
@@ -280,7 +280,7 @@ def _write_coverage_adjusted_effect_plot(
         {
             "artifact_key": "editing_rate_coverage_adjusted_effects_plot",
             "plot_name": plot_root,
-            "plot_title": "Raw and coverage-adjusted editing-rate effects",
+            "plot_title": "Raw and coverage-adjusted edited-cell-rate effects",
             "plot_label": (
                 "Bootstrap intervals for the unconditional and coverage-stratified "
                 "configured-group-minus-remaining-cell effects. Filled markers "
@@ -373,8 +373,8 @@ def write_editing_rate_unconditional_permutation_plot(
     if limits is not None:
         ax.set_ylim(*limits)
     ax.set_xlabel("Amplicon")
-    ax.set_ylabel("Mean inferred allele editing percentage")
-    ax.set_title("Unconditional Selected-Group Permutation Distribution")
+    ax.set_ylabel("Cells with at least one edited allele (%)")
+    ax.set_title("Unconditional Selected-Group Edited-Cell Permutation Distribution")
     ax.grid(axis="y", alpha=0.25)
     ax.legend(loc="best")
     fig.tight_layout()
@@ -388,7 +388,7 @@ def write_editing_rate_unconditional_permutation_plot(
         {
             "artifact_key": "editing_rate_unconditional_permutation_plot",
             "plot_name": plot_root,
-            "plot_title": "Unconditional editing-rate permutation distribution",
+            "plot_title": "Unconditional edited-cell-rate permutation distribution",
             "plot_label": (
                 "For each amplicon, boxplots show configured-group-sized subsets "
                 "drawn without replacement from all eligible cells. Orange diamonds "
@@ -520,11 +520,11 @@ def write_editing_rate_observed_centered_permutation_swarm_plot(
         color="black",
         linestyle="--",
         linewidth=1,
-        label="Observed InGroup editing rate",
+        label="Observed InGroup edited-cell rate",
     )
     ax.set_yticks(np.arange(len(observed), dtype=float))
     ax.set_yticklabels(observed["amplicon"])
-    ax.set_xlabel("Simulated mean relative to observed InGroup mean (percentage points)")
+    ax.set_xlabel("Simulated edited-cell rate relative to observed InGroup rate (percentage points)")
     ax.set_ylabel("Amplicon")
     ax.set_title("Observed-Centered Unconditional Permutation Swarm")
     limits = _interval_axis_limits(
@@ -548,11 +548,11 @@ def write_editing_rate_observed_centered_permutation_swarm_plot(
         {
             "artifact_key": "editing_rate_observed_centered_permutation_swarm_plot",
             "plot_name": plot_root,
-            "plot_title": "Observed-centered unconditional permutation swarm",
+            "plot_title": "Observed-centered edited-cell permutation swarm",
             "plot_label": (
                 "Each point is an InGroup-sized subset drawn without replacement "
                 "from eligible cells, shown relative to the observed InGroup "
-                "editing rate for that amplicon; zero marks the observed rate."
+                "edited-cell rate for that amplicon; zero marks the observed rate."
             ),
         }
     ]
@@ -629,7 +629,7 @@ def write_editing_rate_ci_plots(results: pd.DataFrame, output_root: str) -> List
         )
         if interval_limits is not None:
             ax.set_xlim(*interval_limits)
-        ax.set_xlabel("Mean inferred allele editing percentage")
+        ax.set_xlabel("Cells with at least one edited allele (%)")
         ax.set_ylabel("Amplicon")
         ax.set_title("Amplicon Editing-Rate Confidence Intervals")
         ax.legend()
@@ -645,10 +645,11 @@ def write_editing_rate_ci_plots(results: pd.DataFrame, output_root: str) -> List
             {
                 "artifact_key": "editing_rate_confidence_intervals_plot",
                 "plot_name": plot_root,
-                "plot_title": "Amplicon editing-rate confidence intervals",
+                "plot_title": "Amplicon edited-cell-rate confidence intervals",
                 "plot_label": (
-                    "Pointwise bootstrap confidence intervals for all analyzable "
-                    "and configured analysis-group cells among amplicons with a "
+                    "Pointwise bootstrap confidence intervals for the percentage "
+                    "of all analyzable and configured analysis-group cells with at "
+                    "least one edited allele among amplicons with a "
                     "coverage-adjusted BH p-value at or below 0.05."
                 ),
             }
@@ -901,8 +902,8 @@ def write_editing_rate_depth_stability_plot(
         median_column="median_deviation_pp",
         lower_column="deviation_interval_lower_pp",
         upper_column="deviation_interval_upper_pp",
-        title="Editing-Rate Stability Across Cell-Depth Downsampling",
-        y_label="Deviation from full-cohort editing rate (percentage points)",
+        title="Edited-Cell-Rate Stability Across Cell-Depth Downsampling",
+        y_label="Deviation from full-cohort edited-cell rate (percentage points)",
     )
     absolute_plot_root = OutputContext(output_root).plot_root(
         "editing_rate_depth_stability_plot"
@@ -917,7 +918,7 @@ def write_editing_rate_depth_stability_plot(
         {
             "artifact_key": "editing_rate_depth_stability_plot",
             "plot_name": absolute_plot_root,
-            "plot_title": "Editing-rate cell-depth stability",
+            "plot_title": "Edited-cell-rate cell-depth stability",
             "plot_label": (
                 "Finite-cohort downsampling stability bands for all analyzable "
                 f"and configured analysis-group cells{significance_clause}. Bands "

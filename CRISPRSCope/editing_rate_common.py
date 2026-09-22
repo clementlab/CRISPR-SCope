@@ -165,6 +165,41 @@ def _point_estimate(values: np.ndarray, valid: np.ndarray) -> float:
     return float(np.mean(values[valid]))
 
 
+def categorical_mod_pct_to_cell_edit_pct(
+    values: Sequence[float],
+    *,
+    amplicon: str,
+    barcodes: Sequence[object],
+) -> np.ndarray:
+    """Convert categorical genotype calls to a per-cell any-edit percentage.
+
+    The non-pseudobulk editing summary encodes genotype categories in its
+    ``modPct`` columns: 0 for WT/WT, 50 for WT/Mut, and 100 for Mut/Mut.
+    Editing-rate analyses treat 50 and 100 equivalently as a cell with at
+    least one edited allele. Missing values remain missing so the existing
+    per-amplicon eligibility logic can exclude them.
+    """
+    numeric_values = np.asarray(values, dtype=float)
+    barcode_values = np.asarray(barcodes, dtype=object)
+    if numeric_values.shape != barcode_values.shape:
+        raise ValueError("modPct values and barcodes must have matching shapes")
+
+    finite = np.isfinite(numeric_values)
+    canonical = np.isin(numeric_values, (0.0, 50.0, 100.0))
+    invalid = finite & ~canonical
+    if np.any(invalid):
+        invalid_index = int(np.flatnonzero(invalid)[0])
+        raise ValueError(
+            "Noncategorical modPct value for amplicon "
+            f"{amplicon!r} at barcode {str(barcode_values[invalid_index])!r}: "
+            f"{numeric_values[invalid_index]!r}. Expected NA, 0, 50, or 100."
+        )
+
+    cell_edit_pct = np.full(numeric_values.shape, np.nan, dtype=float)
+    cell_edit_pct[finite] = np.where(numeric_values[finite] == 0.0, 0.0, 100.0)
+    return cell_edit_pct
+
+
 def _percentile_interval(values: Sequence[float], confidence_level: float) -> Tuple[float, float]:
     values = np.asarray(values, dtype=float)
     values = values[np.isfinite(values)]

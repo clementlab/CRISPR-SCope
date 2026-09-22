@@ -249,7 +249,7 @@ You may also use `genome` instead of `bowtie2_index`; internally the pipeline re
 | `amplicon_score_min_reads_per_amplicon` | `5` | Reads required for an amplicon to count as supported in the breadth score; must be at least 1. |
 | `amplicon_score_min_covered_fraction` | `0.6666666666666666` | Fraction of usable amplicons that must be supported for a high score; must be greater than 0 and no greater than 1. |
 | `amplicon_score_max_barcode_rank` | `10000` | Largest total-read barcode rank classified as high depth; must be at least 1. |
-| `write_editing_rate_ci` | `True` | Enables pointwise bootstrap confidence intervals for first-pass cell/allele editing rates; set to `False` to disable. |
+| `write_editing_rate_ci` | `True` | Enables pointwise bootstrap confidence intervals for first-pass edited-cell rates; set to `False` to disable. |
 | `editing_rate_ci_bootstrap_iterations` | `10000` | Number of bootstrap resamples per amplicon; must be at least 100. |
 | `editing_rate_ci_permutation_iterations` | `10000` | Number of configured analysis-group label permutations used for each two-sided significance test; must be at least 100. |
 | `editing_rate_ci_confidence_level` | `0.95` | Pointwise confidence level; must be greater than 0 and less than 1. |
@@ -289,7 +289,7 @@ changed scoring settings cannot silently reuse stale classifications.
 
 ### Editing-Rate Confidence Intervals
 
-By default, CRISPRSCope resamples cells with replacement and computes pointwise percentile-bootstrap intervals from the first-pass inferred allele percentages in `editingSummary.txt`. Set `write_editing_rate_ci` to `False` to disable this analysis. Calls with missing modification percentages or coverage below `min_reads_per_amplicon_per_cell` are excluded independently for each amplicon.
+By default, CRISPRSCope resamples cells with replacement and computes pointwise percentile-bootstrap intervals for the percentage of cells with at least one edited allele. In non-pseudobulk `editingSummary.txt`, `modPct` is a categorical genotype encoding: `0` (WT/WT) is unedited and `50` (WT/Mut) or `100` (Mut/Mut) is edited. Missing calls are excluded independently for each amplicon, as are calls below `min_reads_per_amplicon_per_cell`; any other finite `modPct` value is rejected.
 
 The output reports estimates for each amplicon from:
 
@@ -301,7 +301,7 @@ The output reports estimates for each amplicon from:
 
 For each amplicon, CRISPRSCope first permutes InGroup labels among AllCells without replacement while preserving the observed InGroup size. This unconditional two-sided test asks whether the InGroup behaves differently from a random same-sized subset. The exact permutation draws used for the p-value are also written to `.editingRateUnconditionalPermutationSimulations.txt`, summarized in `.editingRateUnconditionalPermutation.txt`, and shown in `.12_EditingRateUnconditionalPermutation.{png,pdf}` for every estimable amplicon.
 
-The same draws are also shown in `.13_EditingRateObservedCenteredPermutationSwarm.{png,pdf}`. Each point is a simulated InGroup-sized subset mean shown relative to that amplicon's observed InGroup mean, in percentage points; the dashed zero line marks the observed editing rate. This is a second view of the existing simulation output, not an additional resampling procedure.
+The same draws are also shown in `.13_EditingRateObservedCenteredPermutationSwarm.{png,pdf}`. Each point is a simulated InGroup-sized subset edited-cell rate shown relative to that amplicon's observed InGroup edited-cell rate, in percentage points; the dashed zero line marks the observed rate. This is a second view of the existing simulation output, not an additional resampling procedure.
 
 The coverage-controlled follow-up runs for every testable amplicon. Read counts through `editing_rate_ci_coverage_exact_max_reads` define exact strata; higher counts are grouped into consecutive bins of `editing_rate_ci_coverage_bin_width_reads`. Labels are permuted only within strata containing both InGroup and OutGroup cells. The adjusted effect is an information-weighted average of the within-stratum InGroup-minus-OutGroup differences. Cells in single-cohort coverage strata remain in the unconditional estimates but cannot contribute to the controlled effect; common-support counts and retained percentages are reported explicitly. The table also reports common-depth standardized InGroup and OutGroup means using the same normalized overlap weights; their difference equals the coverage-adjusted effect. A separate within-stratum bootstrap supplies the adjusted effect's confidence interval.
 
@@ -313,11 +313,11 @@ These intervals and significance tests quantify cell-sampling and cell-selection
 
 Set `write_editing_rate_depth_stability` to `True` to request this optional detailed analysis; it is disabled by default. CRISPRSCope then repeatedly downsamples eligible cells without replacement, independently for AllCells and InGroup. Requested percentages are applied to each amplicon's eligible cohort, so the actual number of sampled cells is reported for every result.
 
-Within each iteration, the percentage levels are nested: one random ordering of eligible cells supplies the first 10%, 25%, 50%, 75%, and 90%. The output reports the median editing rate, a central interval controlled by `editing_rate_ci_confidence_level`, and absolute deviations from the full-cohort estimate. An exact 100% reference is appended automatically. Random sampling uses `editing_rate_ci_seed`, making identical inputs and settings reproducible across serial and parallel runs.
+Within each iteration, the percentage levels are nested: one random ordering of eligible cells supplies the first 10%, 25%, 50%, 75%, and 90%. The output reports the median edited-cell rate, a central interval controlled by `editing_rate_ci_confidence_level`, and absolute deviations from the full-cohort estimate. An exact 100% reference is appended automatically. Random sampling uses `editing_rate_ci_seed`, making identical inputs and settings reproducible across serial and parallel runs.
 
-Plot 14 reports percentage-point deviations for coverage-controlled significant amplicons with a usable cohort and orders them by the full InGroup editing rate, highest first. If no amplicon passes the coverage-controlled threshold, the table is retained and plot 14 is omitted.
+Plot 14 reports percentage-point deviations for coverage-controlled significant amplicons with a usable cohort and orders them by the full InGroup edited-cell rate, highest first. If no amplicon passes the coverage-controlled threshold, the table is retained and plot 14 is omitted.
 
-The stability bands answer how much the inferred editing rate changes as cells from this run are retained or removed. They are finite-cohort downsampling diagnostics, not confidence intervals across biological replicates.
+The stability bands answer how much the inferred edited-cell rate changes as cells from this run are retained or removed. They are finite-cohort downsampling diagnostics, not confidence intervals across biological replicates.
 
 ### h5ad Zygosity Parameters
 

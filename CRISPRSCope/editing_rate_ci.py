@@ -16,6 +16,7 @@ from .editing_rate_common import (
     EditingRateDepthStabilityConfig,
     _percentile_interval,
     _point_estimate,
+    categorical_mod_pct_to_cell_edit_pct,
 )
 from .editing_rate_resampling import (
     _benjamini_hochberg,
@@ -95,6 +96,7 @@ __all__ = [
     "_percentile_interval",
     "_permutation_hq_minus_all",
     "_point_estimate",
+    "categorical_mod_pct_to_cell_edit_pct",
     "_remove_plot_artifacts",
     "_row_plot_height",
     "_sample_empirical_means",
