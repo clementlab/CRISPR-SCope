@@ -315,6 +315,166 @@ def _barcode_set_sha256(barcodes):
 	return digest.hexdigest()
 
 
+def _existing_or_missing_large_fingerprint(path):
+	if os.path.isfile(path):
+		return large_file_fingerprint(path)
+	return {"path": os.path.abspath(path), "strategy": "stat", "missing": True}
+
+
+def _filter_selected_paths(output_root, amplicon_name):
+	amplicon_dir = output_root + ".seq_by_amplicon"
+	return {
+		"input_r1": build_stage_filename(
+			STAGE_SPLIT, "reads_all_cells", amplicon=amplicon_name,
+			read="r1", ext="fq.gz", output_root=amplicon_dir,
+		),
+		"input_r2": build_stage_filename(
+			STAGE_SPLIT, "reads_all_cells", amplicon=amplicon_name,
+			read="r2", ext="fq.gz", output_root=amplicon_dir,
+		),
+		"input_alleles": build_stage_filename(
+			STAGE_SPLIT, "alleles_all_cells", amplicon=amplicon_name,
+			ext="fq", output_root=amplicon_dir,
+		),
+		"output_r1": build_stage_filename(
+			STAGE_FILTER, "reads_qc_cells", amplicon=amplicon_name,
+			read="r1", ext="fq.gz", output_root=amplicon_dir,
+		),
+		"output_r2": build_stage_filename(
+			STAGE_FILTER, "reads_qc_cells", amplicon=amplicon_name,
+			read="r2", ext="fq.gz", output_root=amplicon_dir,
+		),
+		"output_alleles": build_stage_filename(
+			STAGE_FILTER, "alleles_qc_cells", amplicon=amplicon_name,
+			ext="fq.gz", output_root=amplicon_dir,
+		),
+	}
+
+
+def _build_filter_selected_cache_record(cache_manager, output_root, amplicon_name, barcode_hash):
+	paths = _filter_selected_paths(output_root, amplicon_name)
+	dependencies = []
+	for stage, scope in (("split_reads", "run"), ("parse_crispresso", amplicon_name)):
+		record = cache_manager.load(stage, scope)
+		if record is not None:
+			dependencies.append(cache_manager.dependency(record))
+	return cache_manager.new_record(
+		"filter_selected",
+		amplicon_name,
+		algorithm_version=1,
+		dependencies=dependencies,
+		inputs={
+			"r1": _existing_or_missing_large_fingerprint(paths["input_r1"]),
+			"r2": _existing_or_missing_large_fingerprint(paths["input_r2"]),
+			"alleles": _existing_or_missing_large_fingerprint(paths["input_alleles"]),
+		},
+		parameters={"selected_barcodes_sha256": barcode_hash},
+	)
+
+
+def _filter_selected_cache_requirements(output_root, amplicon_name):
+	paths = _filter_selected_paths(output_root, amplicon_name)
+	return (
+		OutputRequirement("filtered_r1", paths["output_r1"], strategy="stat", allow_empty=True, validator="gzip"),
+		OutputRequirement("filtered_r2", paths["output_r2"], strategy="stat", allow_empty=True, validator="gzip"),
+		OutputRequirement("filtered_alleles", paths["output_alleles"], strategy="stat", allow_empty=True, validator="gzip"),
+	)
+
+
+def _filter_amplicon_reads_with_cache(
+	output_root, parsed_information, amplicon_names, cell_quality_to_analyze,
+	n_processes, cache_manager,
+):
+	amplicon_dir = output_root + ".seq_by_amplicon/"
+	barcodes = set(
+		parsed_information.loc[
+			parsed_information['Color'].isin(cell_quality_to_analyze)
+		].index.tolist()
+	)
+	barcode_hash = _barcode_set_sha256(barcodes)
+	barcode_cache_file = output_root + ".filtered_barcodes.sha256"
+	records = {}
+	requirements = {}
+	read_results = []
+	misses = []
+
+	for amp in amplicon_names:
+		record = _build_filter_selected_cache_record(
+			cache_manager, output_root, amp, barcode_hash
+		)
+		requirement = _filter_selected_cache_requirements(output_root, amp)
+		records[amp] = record
+		requirements[amp] = requirement
+		if cache_manager.evaluate(record, requirement).is_hit:
+			paths = _filter_selected_paths(output_root, amp)
+			read_results.append({
+				"Amplicon": amp, "Status": "Success", "R1": paths["output_r1"],
+				"R2": paths["output_r2"], "Reason": "ValidatedCache",
+			})
+		else:
+			misses.append(amp)
+
+	if misses:
+		with mp.Pool(n_processes) as pool:
+			read_results.extend(pool.map(
+				_filter_to_hq_reads_at_single_amplicon,
+				[(amp, amplicon_dir, barcodes, True) for amp in misses],
+			))
+
+	read_by_amp = {result.get("Amplicon"): result for result in read_results}
+	read_success = [read_by_amp[amp] for amp in amplicon_names if read_by_amp.get(amp, {}).get("Status") == "Success"]
+	read_failures = [read_by_amp[amp] for amp in amplicon_names if read_by_amp.get(amp, {}).get("Status") != "Success"]
+	if not read_success:
+		safe_remove(barcode_cache_file, silent=True)
+		raise RuntimeError(
+			"No amplicons completed read filtering to high quality barcodes successfully."
+		)
+
+	allele_results = []
+	miss_read_success = [result for result in read_success if result["Amplicon"] in misses]
+	if miss_read_success:
+		with mp.Pool(n_processes) as pool:
+			allele_results.extend(pool.map(
+				_filter_to_hq_alleles_at_single_amplicon,
+				[(result, amplicon_dir, barcodes, True) for result in miss_read_success],
+			))
+	for result in read_success:
+		amp = result["Amplicon"]
+		if amp not in misses:
+			allele_results.append({
+				"Amplicon": amp, "Status": "Success",
+				"Out": _filter_selected_paths(output_root, amp)["output_alleles"],
+				"Reason": "ValidatedCache",
+			})
+
+	allele_by_amp = {result.get("Amplicon"): result for result in allele_results}
+	for amp in misses:
+		if (
+			read_by_amp.get(amp, {}).get("Status") == "Success"
+			and allele_by_amp.get(amp, {}).get("Status") == "Success"
+		):
+			cache_manager.commit(records[amp], requirements[amp])
+
+	allele_failures = [
+		allele_by_amp[amp] for amp in amplicon_names
+		if amp in allele_by_amp and allele_by_amp[amp].get("Status") != "Success"
+	]
+	if read_failures or allele_failures:
+		safe_remove(barcode_cache_file, silent=True)
+	else:
+		with open(barcode_cache_file, "w") as handle:
+			handle.write(barcode_hash + "\n")
+	return {
+		"read_filter_successes": read_success,
+		"read_filter_failures": read_failures,
+		"allele_filter_successes": [
+			allele_by_amp[amp] for amp in amplicon_names
+			if allele_by_amp.get(amp, {}).get("Status") == "Success"
+		],
+		"allele_filter_failures": allele_failures,
+	}
+
+
 def filter_amplicon_reads(output_root, parsed_information, amplicon_names,
 							  cell_quality_to_analyze, n_processes, cache_manager=None):
 	"""
@@ -356,6 +516,12 @@ def filter_amplicon_reads(output_root, parsed_information, amplicon_names,
 	- This function does not change the parsed_metrics/reads_per_cell mapping; it
 	  only writes filtered per-amplicon FASTQs for downstream CRISPResso steps.
 	"""
+	if cache_manager is not None:
+		return _filter_amplicon_reads_with_cache(
+			output_root, parsed_information, amplicon_names,
+			cell_quality_to_analyze, n_processes, cache_manager,
+		)
+
 	amplicon_dir = output_root + ".seq_by_amplicon/"
 	barcodes = parsed_information.loc[parsed_information['Color'].isin(cell_quality_to_analyze)].index.tolist()
 	barcodes = set(barcodes)

@@ -1,6 +1,8 @@
 import os
+import gzip
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from CRISPRSCope import amplicon_assignment, crispresso, fastq_processing
@@ -422,3 +424,55 @@ def test_parse_crispresso_setting_change_invalidates(tmp_path, monkeypatch):
             cache_manager=manager,
         )
     assert manager.events[-1]["status"] == "invalid"
+
+
+def _seed_filter_selected_cache(tmp_path):
+    output_root = str(tmp_path / "run")
+    amp_dir = tmp_path / "run.seq_by_amplicon"
+    amp_dir.mkdir()
+    paths = crispresso._filter_selected_paths(output_root, "ampA")
+    for key in ("input_r1", "input_r2", "output_r1", "output_r2", "output_alleles"):
+        with gzip.open(paths[key], "wt") as handle:
+            handle.write("@read:cellA\nACGT\n+\nIIII\n")
+    with open(paths["input_alleles"], "w") as handle:
+        handle.write("@amp:cellA:1\nACGT\n+\nIIII\n")
+    manager = CacheManager(output_root)
+    barcode_hash = crispresso._barcode_set_sha256({"cellA"})
+    record = crispresso._build_filter_selected_cache_record(
+        manager, output_root, "ampA", barcode_hash
+    )
+    requirements = crispresso._filter_selected_cache_requirements(output_root, "ampA")
+    manager.commit(record, requirements)
+    return manager, output_root, paths
+
+
+def test_selected_filter_cache_hit_skips_workers(tmp_path, monkeypatch):
+    manager, output_root, _paths = _seed_filter_selected_cache(tmp_path)
+    monkeypatch.setattr(
+        crispresso.mp,
+        "Pool",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cache miss")),
+    )
+    parsed = pd.DataFrame({"Color": ["HQ_HI"]}, index=["cellA"])
+    result = crispresso.filter_amplicon_reads(
+        output_root, parsed, ["ampA"], ["HQ_HI"], 1, cache_manager=manager
+    )
+    assert not result["read_filter_failures"]
+    assert not result["allele_filter_failures"]
+    assert manager.events[-1]["status"] == "hit"
+
+
+def test_selected_filter_source_change_invalidates_with_same_barcodes(tmp_path):
+    manager, output_root, paths = _seed_filter_selected_cache(tmp_path)
+    with gzip.open(paths["input_r1"], "at") as handle:
+        handle.write("@changed:cellA\nTGCA\n+\nIIII\n")
+    record = crispresso._build_filter_selected_cache_record(
+        manager,
+        output_root,
+        "ampA",
+        crispresso._barcode_set_sha256({"cellA"}),
+    )
+    decision = manager.evaluate(
+        record, crispresso._filter_selected_cache_requirements(output_root, "ampA")
+    )
+    assert decision.status == "invalid"
