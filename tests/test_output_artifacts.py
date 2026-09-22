@@ -75,8 +75,13 @@ def test_manifest_records_completed_and_failed_runs_atomically(tmp_path):
     manifest_path = manifest.write()
 
     payload = json.loads(open(manifest_path, encoding="utf-8").read())
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["status"] == "completed"
+    assert payload["cache"] == {
+        "mode": "auto",
+        "summary": {"hit": 0, "miss": 0, "invalid": 0, "refresh": 0, "disabled": 0},
+        "events": [],
+    }
     assert [artifact["key"] for artifact in payload["artifacts"]][:2] == [
         "editing_summary",
         "filtered_editing_summary",

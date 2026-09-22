@@ -454,7 +454,8 @@ def run_alignment(args):
 
 def parse_and_align_reads(r1_fastqs,r2_fastqs,constant1,constant2,
 						  output_root,barcode_file,allow_barcode_mismatches,
-						  adapter_DNA,bowtie2_index,n_processes,keep_intermediate_files=False):
+						  adapter_DNA,bowtie2_index,n_processes,keep_intermediate_files=False,
+						  cache_manager=None):
 	"""
 	Parse input FASTQs (possibly in parallel), align parsed reads, and produce a name-sorted BAM
 	and a cell-count mapping.

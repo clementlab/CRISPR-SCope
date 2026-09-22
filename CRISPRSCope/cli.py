@@ -68,6 +68,7 @@ from .settings import (
     _parse_float_setting,
     _parse_int_setting,
     _parse_settings_file,
+    _parse_cache_config,
     _resolve_existing_fastq_path,
     _resolve_settings_path,
     _resolve_settings_path_list,

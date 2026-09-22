@@ -63,7 +63,7 @@ def test_baf3_minimal_fixture_matches_golden_baseline(tmp_path):
 
     output_root = run_dir / "run"
     output_manifest = json.loads((run_dir / "run.outputManifest.json").read_text())
-    assert output_manifest["schema_version"] == 1
+    assert output_manifest["schema_version"] == 2
     assert output_manifest["status"] == "completed"
     assert [artifact["key"] for artifact in output_manifest["artifacts"]] == [
         spec.key for spec in ARTIFACT_SPECS

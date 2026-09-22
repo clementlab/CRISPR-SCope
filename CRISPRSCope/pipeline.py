@@ -38,6 +38,7 @@ from scipy.stats import multinomial
 from upsetplot import UpSet
 
 from CRISPRSCope import __version__
+from CRISPRSCope.cache import CacheManager, OutputRootLock
 from CRISPRSCope.io_utils import open_text_maybe_gzip
 from CRISPRSCope.output_artifacts import OutputContext, OutputManifest
 
@@ -60,7 +61,8 @@ from .plots_and_report import (
 )
 from .settings import (
     _parse_amplicon_score_config, _parse_editing_rate_ci_config,
-    _parse_editing_rate_depth_stability_config, parse_settings,
+    _parse_editing_rate_depth_stability_config, _parse_cache_config,
+    _parse_settings_file, _resolve_settings_path, parse_settings,
 )
 
 def _require_selected_barcodes(parsed_information, cell_quality_to_analyze):
@@ -114,6 +116,23 @@ def write_h5ad_output(output_root, settings_file, h5ad_output=None, h5ad_export_
 
 
 def run_pipeline(manifest_observer=None):
+	"""Resolve and lock the output root before entering the pipeline."""
+	if len(sys.argv) > 1 and sys.argv[1] in {"--version", "-V"}:
+		print(__version__)
+		return
+	if len(sys.argv) < 2:
+		return _run_pipeline_unlocked(manifest_observer)
+	settings_file = os.path.abspath(sys.argv[1])
+	settings = _parse_settings_file(settings_file)
+	output_root = settings_file
+	if "output_root" in settings:
+		output_root = _resolve_settings_path(settings["output_root"], os.path.dirname(settings_file))
+	output_root = validate_output_root(output_root)
+	with OutputRootLock(output_root):
+		return _run_pipeline_unlocked(manifest_observer)
+
+
+def _run_pipeline_unlocked(manifest_observer=None):
 	"""
 	Top-level pipeline entry point for the CRISPRSCope processing workflow.
 
@@ -153,14 +172,23 @@ def run_pipeline(manifest_observer=None):
 	amplicon_score_config = _parse_amplicon_score_config(settings_file)
 	editing_rate_ci_config = _parse_editing_rate_ci_config(settings_file)
 	editing_rate_depth_stability_config = _parse_editing_rate_depth_stability_config(settings_file)
+	cache_config = _parse_cache_config(settings_file)
 	end_settings = time.time() - start_settings
 	#print(f"Parse Settings: {end_settings}")
 
 	output_root = validate_output_root(output_root)
 	outputs = OutputContext(output_root, h5ad_output=h5ad_output)
 	manifest = OutputManifest(outputs) if write_output_manifest else None
+	if manifest is not None:
+		manifest.configure_cache(cache_config.mode.value)
 	if manifest_observer is not None:
 		manifest_observer(manifest)
+	cache_manager = CacheManager(
+		output_root,
+		cache_config,
+		producer_version=__version__,
+		event_callback=manifest.record_cache_event if manifest is not None else None,
+	)
 
 	def record_plot(key, plot_object, reason="plot requirements were not met"):
 		if manifest is None:
@@ -193,7 +221,7 @@ def run_pipeline(manifest_observer=None):
 	if manifest is not None:
 		manifest.set_stage("parse_and_align_reads")
 	start_parse_and_align = time.time()
-	aligned_bam, reads_per_cell = parse_and_align_reads(r1,r2,constant1,constant2,output_root,barcode_file,allow_barcode_mismatches,adapter_DNA,bowtie2_index,n_processes,keep_intermediate_files)
+	aligned_bam, reads_per_cell = parse_and_align_reads(r1,r2,constant1,constant2,output_root,barcode_file,allow_barcode_mismatches,adapter_DNA,bowtie2_index,n_processes,keep_intermediate_files, cache_manager=cache_manager)
 	end_parse_and_align = time.time() - start_parse_and_align
 	logging.info(f"Parse and Align Reads: {end_parse_and_align}")
 
@@ -201,7 +229,7 @@ def run_pipeline(manifest_observer=None):
 	if manifest is not None:
 		manifest.set_stage("split_reads_by_amplicon")
 	start_split_reads = time.time()
-	amplicon_names, amplicon_information, amplicon_info_file = split_reads_by_amplicon(aligned_bam, output_root, amplicon_file, alt_alleles_file, primer_lookup_len, amp_file_dir, bowtie2_index, adapter_DNA, n_processes, keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons, debug_rescued_reads_bam, debug_require_strict_amplicon_alignment, debug_rejected_rescue_reads_bam, partial_rescue_min_mean_read_quality)
+	amplicon_names, amplicon_information, amplicon_info_file = split_reads_by_amplicon(aligned_bam, output_root, amplicon_file, alt_alleles_file, primer_lookup_len, amp_file_dir, bowtie2_index, adapter_DNA, n_processes, keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons, debug_rescued_reads_bam, debug_require_strict_amplicon_alignment, debug_rejected_rescue_reads_bam, partial_rescue_min_mean_read_quality, cache_manager=cache_manager)
 	end_split_reads = time.time() - start_split_reads
 	logging.info(f"Split Reads by Amplicon: {end_split_reads}")
 	mark_written(
@@ -216,7 +244,7 @@ def run_pipeline(manifest_observer=None):
 	if manifest is not None:
 		manifest.set_stage("run_crispresso")
 	start_crispresso = time.time()
-	crispresso_information = run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles = False)
+	crispresso_information = run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles = False, cache_manager=cache_manager)
 	end_crispresso = time.time() - start_crispresso
 	logging.info(f"Run CRISPResso: {end_crispresso}")
 
@@ -227,7 +255,8 @@ def run_pipeline(manifest_observer=None):
 											  crispresso_information,output_root, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell,
 											  n_processes=n_processes,
 											  ignore_substitutions=ignore_substitutions,
-											  amplicon_score_config=amplicon_score_config)
+											  amplicon_score_config=amplicon_score_config,
+											  cache_manager=cache_manager)
 	end_parse_crispresso = time.time() - start_parse_crispresso
 	logging.info(f"Parse CRISPResso Outputs: {end_parse_crispresso}")
 	mark_written(
@@ -241,14 +270,14 @@ def run_pipeline(manifest_observer=None):
 		manifest.set_stage("filter_amplicon_reads")
 	start_filter_amplicon = time.time()
 	_require_selected_barcodes(parsed_information, cell_quality_to_analyze)
-	filter_amplicon_reads(output_root, parsed_information, amplicon_names, cell_quality_to_analyze, n_processes)
+	filter_amplicon_reads(output_root, parsed_information, amplicon_names, cell_quality_to_analyze, n_processes, cache_manager=cache_manager)
 	end_filter_amplicon = time.time() - start_filter_amplicon
 	logging.info(f"Filter Amplicon Reads: {end_filter_amplicon}")
 
 	if manifest is not None:
 		manifest.set_stage("run_filtered_crispresso")
 	start_run_crispresso2 = time.time()
-	crispresso_filtered_information = run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles = True)
+	crispresso_filtered_information = run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles = True, cache_manager=cache_manager)
 	end_run_crispresso2 = time.time() - start_run_crispresso2
 	logging.info(f"Run CRISPResso 2: {end_run_crispresso2}")
 

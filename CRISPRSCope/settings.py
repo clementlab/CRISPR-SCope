@@ -38,6 +38,7 @@ from scipy.stats import multinomial
 from upsetplot import UpSet
 
 from CRISPRSCope import __version__
+from CRISPRSCope.cache import CacheConfig
 from CRISPRSCope.io_utils import open_text_maybe_gzip
 from CRISPRSCope.output_artifacts import OutputContext, OutputManifest
 
@@ -75,6 +76,12 @@ class AmpliconScoreConfig:
 			raise ValueError("amplicon_score_min_covered_fraction must be > 0 and <= 1")
 		if self.max_barcode_rank < 1:
 			raise ValueError("amplicon_score_max_barcode_rank must be >= 1")
+
+
+def _parse_cache_config(settings_file):
+	"""Parse the cache policy without changing the legacy settings tuple."""
+	settings = _parse_settings_file(settings_file)
+	return CacheConfig.from_value(settings.get("cache_mode", "auto"))
 
 
 def _resolve_settings_path(path_value: str, settings_dir: str) -> str:

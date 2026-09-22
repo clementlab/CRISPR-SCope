@@ -310,7 +310,7 @@ def _barcode_set_sha256(barcodes):
 
 
 def filter_amplicon_reads(output_root, parsed_information, amplicon_names,
-						  cell_quality_to_analyze, n_processes):
+							  cell_quality_to_analyze, n_processes, cache_manager=None):
 	"""
 	Filter per-amplicon FASTQs and allele files to only include reads from
 	barcodes classified as high-quality, running the work in parallel.
@@ -445,7 +445,7 @@ def _filtered_allele_fastq_path(output_root, amplicon_name):
 	)
 
 
-def run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles):
+def run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles, cache_manager=None):
 	"""
 	Generate and execute CRISPResso2 commands for each amplicon.
 
@@ -1402,11 +1402,12 @@ def _parse_cache_matches_ignore_substitutions(folder_finished_file, ignore_subst
 
 
 def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_file,crispresso_information,
-							output_root, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, n_processes,num_max_alleles=2,num_references=1,
-							min_num_reads_per_cell=5,min_allele_pct_cutoff=.1,min_allele_count_cutoff=2,
-							ignore_substitutions=False,
-							write_alleles=False,
-							amplicon_score_config=None):
+								output_root, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, n_processes,num_max_alleles=2,num_references=1,
+								min_num_reads_per_cell=5,min_allele_pct_cutoff=.1,min_allele_count_cutoff=2,
+								ignore_substitutions=False,
+								write_alleles=False,
+								amplicon_score_config=None,
+								cache_manager=None):
 	"""
 	Generate and execute CRISPResso2 commands for each amplicon.
 

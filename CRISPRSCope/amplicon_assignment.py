@@ -421,7 +421,7 @@ def _classify_amplicon_assignment(
 	return result
 
 
-def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_file,primer_lookup_len,amp_file_dir,bowtie2_index,adapter_DNA,n_processes,keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons=False, debug_rescued_reads_bam="", debug_require_strict_amplicon_alignment=False, debug_rejected_rescue_reads_bam="", partial_rescue_min_mean_read_quality=PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT):
+def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_file,primer_lookup_len,amp_file_dir,bowtie2_index,adapter_DNA,n_processes,keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons=False, debug_rescued_reads_bam="", debug_require_strict_amplicon_alignment=False, debug_rejected_rescue_reads_bam="", partial_rescue_min_mean_read_quality=PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT, cache_manager=None):
 	"""
 	Split reads from a name-sorted aligned BAM into per-amplicon FASTQ files.
 

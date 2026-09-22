@@ -254,7 +254,7 @@ class OutputContext:
 class OutputManifest:
     """Ordered lifecycle record for one pipeline run's registered artifacts."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, context: OutputContext):
         self.context = context
@@ -264,6 +264,14 @@ class OutputManifest:
         self._events: dict[str, dict[str, object]] = {
             spec.key: {"status": "not_reached"} for spec in ARTIFACT_SPECS
         }
+        self.cache_mode = "auto"
+        self.cache_events: list[dict[str, object]] = []
+
+    def configure_cache(self, mode: str) -> None:
+        self.cache_mode = str(mode)
+
+    def record_cache_event(self, event: Mapping[str, object]) -> None:
+        self.cache_events.append(dict(event))
 
     def set_stage(self, stage: str) -> None:
         self.active_stage = stage
@@ -333,6 +341,14 @@ class OutputManifest:
             "status": self.status,
             "artifacts": artifacts,
             "artifact_families": families,
+            "cache": {
+                "mode": self.cache_mode,
+                "summary": {
+                    status: sum(event.get("status") == status for event in self.cache_events)
+                    for status in ("hit", "miss", "invalid", "refresh", "disabled")
+                },
+                "events": list(self.cache_events),
+            },
         }
         if self.failure is not None:
             result["failure"] = {"stage": self.active_stage, **self.failure}
