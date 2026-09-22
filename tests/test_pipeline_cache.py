@@ -270,7 +270,8 @@ def _seed_crispresso_cache(tmp_path, monkeypatch, *, alleles=False):
     folder = run_dir / "CRISPResso_on_ampA"
     folder.mkdir()
     (folder / "CRISPResso2_info.json").write_text("{}\n")
-    (folder / "CRISPResso_output.fastq.gz").write_text("fastq\n")
+    with gzip.open(folder / "CRISPResso_output.fastq.gz", "wt") as handle:
+        handle.write("fastq\n")
     (run_dir / "CRISPResso_on_ampA.html").write_text("<html></html>\n")
     finished = run_dir / "ampA.finished"
     finished.write_text("")
@@ -336,7 +337,7 @@ def test_crispresso_changed_guide_clears_and_reruns_exact_amplicon(tmp_path, mon
                 os.makedirs(job["crispresso_run_folder"], exist_ok=True)
                 with open(os.path.join(job["crispresso_run_folder"], "CRISPResso2_info.json"), "w") as handle:
                     handle.write("{}\n")
-                with open(os.path.join(job["crispresso_run_folder"], "CRISPResso_output.fastq.gz"), "w") as handle:
+                with gzip.open(os.path.join(job["crispresso_run_folder"], "CRISPResso_output.fastq.gz"), "wt") as handle:
                     handle.write("fastq\n")
                 with open(job["crispresso_run_folder"] + ".html", "w") as handle:
                     handle.write("<html></html>\n")
@@ -358,6 +359,60 @@ def test_crispresso_changed_guide_clears_and_reruns_exact_amplicon(tmp_path, mon
     )
     assert result["ampA"]["status"] == "Completed"
     assert manager.events[-1]["status"] == "invalid"
+
+
+def test_crispresso_commits_later_success_after_incomplete_amplicon(tmp_path, monkeypatch):
+    output_root = str(tmp_path / "run")
+    crispresso_dir = tmp_path / "run.crispresso"
+    crispresso_dir.mkdir()
+    amp_dir = tmp_path / "run.seq_by_amplicon"
+    amp_dir.mkdir()
+    information = {}
+    for amp in ("ampA", "ampB"):
+        r1 = amp_dir / f"{amp}.r1.fq.gz"
+        r2 = amp_dir / f"{amp}.r2.fq.gz"
+        r1.write_text("reads\n")
+        r2.write_text("reads\n")
+        information[amp] = {
+            "name": amp, "aln_count": "1", "reads_r1_file": str(r1),
+            "reads_r2_file": str(r2), "amp_seqs": "ACGT", "guide_seq": "",
+        }
+    monkeypatch.setattr(crispresso, "tool_identity", _tool)
+
+    class Pool:
+        def __init__(self, *_args):
+            pass
+
+        def map_async(self, _function, jobs):
+            values = []
+            for job in jobs:
+                os.makedirs(job["crispresso_run_folder"], exist_ok=True)
+                with open(os.path.join(job["crispresso_run_folder"], "CRISPResso2_info.json"), "w") as handle:
+                    handle.write("{}\n")
+                if job["amplicon_name"] == "ampB":
+                    with gzip.open(os.path.join(job["crispresso_run_folder"], "CRISPResso_output.fastq.gz"), "wt") as handle:
+                        handle.write("fastq\n")
+                with open(job["finished_file"], "w"):
+                    pass
+                values.append({"returncode": 0, "error": None, "command": job["command"]})
+            return SimpleNamespace(get=lambda *_args: values)
+
+        def close(self):
+            pass
+
+        def join(self):
+            pass
+
+    monkeypatch.setattr(crispresso.mp, "Pool", Pool)
+    manager = CacheManager(output_root)
+    with pytest.raises(Exception, match="Cannot commit cache record"):
+        crispresso.run_crispresso_commands(
+            ["ampA", "ampB"], information, output_root, str(crispresso_dir),
+            True, 1, alleles=False, cache_manager=manager,
+        )
+
+    assert manager.load("crispresso_reads", "ampA") is None
+    assert manager.load("crispresso_reads", "ampB") is not None
 
 
 def _seed_parse_crispresso_cache(tmp_path):
@@ -479,7 +534,8 @@ def test_removed_amplicon_prunes_only_trusted_stage_owned_outputs(tmp_path):
     run_folder = crispresso_dir / "CRISPResso_on_removed"
     run_folder.mkdir()
     (run_folder / "CRISPResso2_info.json").write_text("{}\n")
-    (run_folder / "CRISPResso_output.fastq.gz").write_text("fastq\n")
+    with gzip.open(run_folder / "CRISPResso_output.fastq.gz", "wt") as handle:
+        handle.write("fastq\n")
     marker = crispresso_dir / "removed.finished"
     marker.write_text("")
     log = crispresso_dir / "removed.log"

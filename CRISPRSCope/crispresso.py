@@ -746,7 +746,7 @@ def _crispresso_cache_requirements(
 		OutputRequirement(
 			"crispresso_fastq",
 			os.path.join(crispresso_run_folder, "CRISPResso_output.fastq.gz"),
-			strategy="stat",
+			strategy="stat", validator="gzip",
 		),
 	]
 	if require_report:
@@ -1096,9 +1096,16 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 				command_errors.append(completed_job)
 			elif cache_manager is not None:
 				amplicon_name = job['amplicon_name']
-				cache_manager.commit(
-					cache_records[amplicon_name], cache_requirements[amplicon_name]
-				)
+				try:
+					cache_manager.commit(
+						cache_records[amplicon_name], cache_requirements[amplicon_name]
+					)
+				except Exception as error:
+					command_errors.append({
+						"command": job.get("command"),
+						"returncode": completed_job.get("returncode", 0),
+						"error": str(error),
+					})
 
 	for amplicon_name in amplicon_names:
 		if 'status' in crispresso_information[amplicon_name] and crispresso_information[amplicon_name]['status'] == 'Skipped':

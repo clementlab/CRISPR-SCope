@@ -196,7 +196,7 @@ def _validate_output(requirement: OutputRequirement) -> str | None:
                     int(fields[1])
         elif requirement.validator is not None:
             raise ValueError(f"Unknown output validator: {requirement.validator}")
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
         return "output_invalid"
     return None
 
@@ -383,6 +383,8 @@ class CacheManager:
         return record
 
     def load(self, stage: str, scope: str = "run") -> CacheRecord | None:
+        if self.config.mode is CacheMode.DISABLED:
+            return None
         try:
             return self._read_record(self.record_path(stage, scope))
         except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):

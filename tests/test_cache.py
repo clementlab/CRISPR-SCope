@@ -140,8 +140,44 @@ def test_refresh_and_disabled_modes_do_not_hit(tmp_path):
     disabled = CacheManager(str(tmp_path / "run"), CacheConfig(CacheMode.DISABLED))
     disabled_record = disabled.new_record("disabled", algorithm_version=1)
     assert disabled.evaluate(disabled_record, [requirement]).status == "disabled"
+    disabled._read_record = lambda _path: (_ for _ in ()).throw(
+        AssertionError("disabled mode must not read cache records")
+    )
+    assert disabled.load("stage") is None
     disabled.commit(disabled_record, [requirement])
     assert not os.path.exists(disabled.record_path("disabled"))
+
+
+def test_malformed_cell_counts_and_gzip_outputs_invalidate_cleanly(tmp_path):
+    manager = CacheManager(str(tmp_path / "run"))
+    counts = tmp_path / "counts.txt"
+    counts.write_text("cellA\t1\n")
+    fastq = tmp_path / "reads.fq.gz"
+    import gzip
+    with gzip.open(fastq, "wt") as handle:
+        handle.write("")
+    requirements = (
+        OutputRequirement(
+            "counts", str(counts), strategy="sha256", validator="cell_counts"
+        ),
+        OutputRequirement(
+            "fastq", str(fastq), strategy="stat", allow_empty=True,
+            validator="gzip",
+        ),
+    )
+    record = manager.new_record("validated", algorithm_version=1)
+    manager.commit(record, requirements)
+
+    counts.write_text("cellA\tnot-an-integer\n")
+    decision = manager.evaluate(record, requirements)
+    assert decision.status == "invalid"
+    assert decision.reasons == ("output_invalid:counts",)
+
+    counts.write_text("cellA\t1\n")
+    fastq.write_text("not gzip\n")
+    decision = manager.evaluate(record, requirements)
+    assert decision.status == "invalid"
+    assert decision.reasons == ("output_invalid_gzip:fastq",)
 
 
 def test_per_scope_record_paths_do_not_collide(tmp_path):
