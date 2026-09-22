@@ -109,6 +109,29 @@ def test_manifest_records_completed_and_failed_runs_atomically(tmp_path):
     }
 
 
+def test_manifest_reports_cache_mode_summary_and_ordered_events(tmp_path):
+    manifest = OutputManifest(OutputContext(str(tmp_path / "run")))
+    manifest.configure_cache("refresh")
+    manifest.record_cache_event({
+        "stage": "parse_align", "scope": "run", "status": "refresh",
+        "reasons": ["refresh_requested"], "cache_key": "key-a",
+    })
+    manifest.record_cache_event({
+        "stage": "split_reads", "scope": "run", "status": "miss",
+        "reasons": ["record_missing"], "cache_key": "key-b",
+    })
+
+    cache = manifest.as_dict()["cache"]
+
+    assert cache["mode"] == "refresh"
+    assert cache["summary"] == {
+        "hit": 0, "miss": 1, "invalid": 0, "refresh": 1, "disabled": 0,
+    }
+    assert [event["stage"] for event in cache["events"]] == [
+        "parse_align", "split_reads",
+    ]
+
+
 def test_cli_main_writes_requested_manifest_on_success_and_preserves_failure(tmp_path, monkeypatch):
     from CRISPRSCope import cli
 

@@ -462,6 +462,75 @@ def test_selected_filter_cache_hit_skips_workers(tmp_path, monkeypatch):
     assert manager.events[-1]["status"] == "hit"
 
 
+def test_removed_amplicon_prunes_only_trusted_stage_owned_outputs(tmp_path):
+    output_root = str(tmp_path / "run")
+    crispresso_dir = tmp_path / "run.crispresso"
+    crispresso_dir.mkdir()
+    run_folder = crispresso_dir / "CRISPResso_on_removed"
+    run_folder.mkdir()
+    (run_folder / "CRISPResso2_info.json").write_text("{}\n")
+    (run_folder / "CRISPResso_output.fastq.gz").write_text("fastq\n")
+    marker = crispresso_dir / "removed.finished"
+    marker.write_text("")
+    log = crispresso_dir / "removed.log"
+    log.write_text("old\n")
+    manager = CacheManager(output_root)
+    record = manager.new_record(
+        "crispresso_reads", "removed", algorithm_version=1
+    )
+    manager.commit(
+        record,
+        crispresso._crispresso_cache_requirements(str(marker), str(run_folder)),
+    )
+
+    unsafe = manager.new_record(
+        "crispresso_reads", "../outside", algorithm_version=1
+    )
+    manager.commit(unsafe, ())
+    outside = tmp_path / "outside.finished"
+    outside.write_text("keep\n")
+
+    removed = crispresso.prune_removed_amplicon_caches(
+        manager, [], output_root, str(crispresso_dir)
+    )
+
+    assert ("crispresso_reads", "removed") in removed
+    assert not run_folder.exists()
+    assert not marker.exists()
+    assert not log.exists()
+    assert not os.path.exists(manager.record_path("crispresso_reads", "removed"))
+    assert outside.exists()
+    assert os.path.exists(manager.record_path("crispresso_reads", "../outside"))
+
+
+def test_replaced_split_prunes_fastqs_owned_by_prior_record(tmp_path):
+    amp_dir = tmp_path / "run.seq_by_amplicon"
+    amp_dir.mkdir()
+    output_root = str(tmp_path / "run")
+    old_r1 = amp_dir / "03_reads_all_cells.old.r1.fq.gz"
+    old_r2 = amp_dir / "03_reads_all_cells.old.r2.fq.gz"
+    for path in (old_r1, old_r2):
+        with gzip.open(path, "wt") as handle:
+            handle.write("")
+    manager = CacheManager(output_root)
+    previous = manager.new_record("split_reads", algorithm_version=1)
+    manager.commit(
+        previous,
+        (
+            OutputRequirement("reads:old:r1", str(old_r1), strategy="stat", allow_empty=True, validator="gzip"),
+            OutputRequirement("reads:old:r2", str(old_r2), strategy="stat", allow_empty=True, validator="gzip"),
+        ),
+    )
+
+    removed = amplicon_assignment._prune_obsolete_split_outputs(
+        manager, previous, (), str(amp_dir)
+    )
+
+    assert set(removed) == {str(old_r1), str(old_r2)}
+    assert not old_r1.exists()
+    assert not old_r2.exists()
+
+
 def test_selected_filter_source_change_invalidates_with_same_barcodes(tmp_path):
     manager, output_root, paths = _seed_filter_selected_cache(tmp_path)
     with gzip.open(paths["input_r1"], "at") as handle:

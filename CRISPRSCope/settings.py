@@ -38,7 +38,7 @@ from scipy.stats import multinomial
 from upsetplot import UpSet
 
 from CRISPRSCope import __version__
-from CRISPRSCope.cache import CacheConfig
+from CRISPRSCope.cache import CacheConfig, tool_identity
 from CRISPRSCope.io_utils import open_text_maybe_gzip
 from CRISPRSCope.output_artifacts import OutputContext, OutputManifest
 
@@ -616,18 +616,16 @@ def parse_settings(args):
 		os.makedirs(crispresso_dir, exist_ok=True)
 
 
-	#check software
-	#check bowtie2
-	try:
-		bowtie_result = sb.check_output(['bowtie2', '--version'], stderr=sb.STDOUT)
-	except Exception:
-		raise Exception('Error: bowtie2 is required')
-
-	#check crispresso
-	try:
-		crispresso_result = sb.check_output(['CRISPResso', '--version'], stderr=sb.STDOUT)
-	except Exception:
-		raise Exception('Error: CRISPResso2 is required')
+	# Resolve required tools once. Cache keys reuse these memoized identities.
+	for command, error_message in (
+		(("bowtie2", "--version"), "Error: bowtie2 is required"),
+		(("samtools", "--version"), "Error: samtools is required"),
+		(("CRISPResso", "--version"), "Error: CRISPResso2 is required"),
+	):
+		try:
+			tool_identity(command)
+		except Exception as error:
+			raise Exception(error_message) from error
 
 
 	return (r1, r2, constant1, constant2, allow_barcode_mismatches,barcode_file, amplicon_file, primer_lookup_len, adapter_DNA, amp_file_dir, alt_alleles_file, bowtie2_index, crispresso_dir, output_root, n_processes, keep_intermediate_files, ignore_substitutions, assign_reads_to_all_possible_amplicons, suppress_sub_crispresso_plots, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, cell_quality_to_analyze, write_h5ad, h5ad_output, h5ad_export_config, debug_rescued_reads_bam, debug_rejected_rescue_reads_bam, debug_require_strict_amplicon_alignment, partial_rescue_min_mean_read_quality, write_output_manifest, settings_file)

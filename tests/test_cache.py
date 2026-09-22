@@ -13,6 +13,7 @@ from CRISPRSCope.cache import (
     large_file_fingerprint,
     safe_remove_owned,
     small_file_fingerprint,
+	tool_identity,
 )
 
 
@@ -44,6 +45,23 @@ def test_small_and_large_fingerprints_use_declared_strategies(tmp_path, monkeypa
     assert fingerprint["strategy"] == "stat"
     assert fingerprint["size"] == 5
     assert "sha256" not in fingerprint
+
+
+def test_tool_identity_is_resolved_once_per_process(monkeypatch):
+    calls = []
+    tool_identity.cache_clear()
+    monkeypatch.setattr("CRISPRSCope.cache.shutil.which", lambda _name: "/tools/example")
+    monkeypatch.setattr(
+        "CRISPRSCope.cache.subprocess.check_output",
+        lambda *args, **kwargs: calls.append(args[0]) or "example 1.0  \n",
+    )
+    try:
+        first = tool_identity(("example-cache-test", "--version"))
+        second = tool_identity(("example-cache-test", "--version"))
+    finally:
+        tool_identity.cache_clear()
+    assert first == second == {"path": "/tools/example", "version": "example 1.0"}
+    assert calls == [("example-cache-test", "--version")]
 
 
 def test_cache_record_round_trip_and_output_invalidation(tmp_path):
@@ -163,3 +181,18 @@ def test_safe_remove_owned_rejects_outside_paths_and_external_symlinks(tmp_path)
     with pytest.raises(ValueError, match="symlink outside"):
         safe_remove_owned(link, allowed_root=owned)
     assert outside.exists()
+
+
+def test_trusted_stage_inventory_ignores_corrupt_and_misnamed_records(tmp_path, caplog):
+    manager = CacheManager(str(tmp_path / "run"))
+    trusted = manager.new_record("stage", "ampA", algorithm_version=1)
+    manager.commit(trusted, ())
+    corrupt = tmp_path / "run.cache" / "stage" / "corrupt.json"
+    corrupt.write_text("{")
+
+    records = manager.trusted_stage_records("stage")
+
+    assert [record.scope for record in records] == ["ampA"]
+    assert "Ignoring untrusted cache record" in caplog.text
+    assert manager.remove_record(records[0])
+    assert not os.path.exists(manager.record_path("stage", "ampA"))

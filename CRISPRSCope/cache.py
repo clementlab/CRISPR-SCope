@@ -139,6 +139,8 @@ def tool_identity(command: tuple[str, ...]) -> dict[str, str]:
     if executable is None:
         raise FileNotFoundError(f"Required executable not found: {command[0]}")
     output = subprocess.check_output(command, stderr=subprocess.STDOUT, text=True)
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", errors="replace")
     normalized = "\n".join(line.rstrip() for line in output.strip().splitlines())
     return {"path": os.path.realpath(executable), "version": normalized}
 
@@ -385,6 +387,44 @@ class CacheManager:
             return self._read_record(self.record_path(stage, scope))
         except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
             return None
+
+    def trusted_stage_records(self, stage: str) -> tuple[CacheRecord, ...]:
+        """Return supported per-scope records whose paths match their identities.
+
+        This inventory is intentionally stricter than :meth:`load` because its
+        results may be used to authorize removal of obsolete stage-owned files.
+        """
+        if self.config.mode is CacheMode.DISABLED:
+            return ()
+        directory = Path(self.cache_root, stage)
+        if not directory.is_dir():
+            return ()
+        records: list[CacheRecord] = []
+        for path in sorted(directory.glob("*.json")):
+            try:
+                record = self._read_record(str(path))
+                if record.stage != stage or record.scope == "run":
+                    raise ValueError("record stage or scope is inconsistent")
+                if Path(self.record_path(record.stage, record.scope)) != path:
+                    raise ValueError("record filename does not match its identity")
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+                logging.warning(
+                    "Ignoring untrusted cache record during stale cleanup: %s (%s)",
+                    path,
+                    error,
+                )
+                continue
+            records.append(record)
+        return tuple(records)
+
+    def remove_record(self, record: CacheRecord) -> bool:
+        """Remove the exact record path derived from a trusted record identity."""
+        path = Path(self.record_path(record.stage, record.scope))
+        return safe_remove_owned(
+            path,
+            allowed_root=Path(self.cache_root, record.stage),
+            expected_name=path.name,
+        )
 
     def _emit(self, decision: CacheDecision, stage: str, scope: str) -> None:
         event: dict[str, object] = {

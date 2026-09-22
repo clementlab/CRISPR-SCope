@@ -44,7 +44,8 @@ from CRISPRSCope.output_artifacts import OutputContext, OutputManifest
 
 from .amplicon_assignment import split_reads_by_amplicon
 from .crispresso import (
-    filter_amplicon_reads, parse_crispresso_outputs, run_crispresso_commands,
+    filter_amplicon_reads, parse_crispresso_outputs, prune_removed_amplicon_caches,
+    run_crispresso_commands,
     write_filtered_editing_summary_from_filtered_crispresso,
 )
 from .fastq_processing import parse_and_align_reads
@@ -230,6 +231,9 @@ def _run_pipeline_unlocked(manifest_observer=None):
 		manifest.set_stage("split_reads_by_amplicon")
 	start_split_reads = time.time()
 	amplicon_names, amplicon_information, amplicon_info_file = split_reads_by_amplicon(aligned_bam, output_root, amplicon_file, alt_alleles_file, primer_lookup_len, amp_file_dir, bowtie2_index, adapter_DNA, n_processes, keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons, debug_rescued_reads_bam, debug_require_strict_amplicon_alignment, debug_rejected_rescue_reads_bam, partial_rescue_min_mean_read_quality, cache_manager=cache_manager)
+	prune_removed_amplicon_caches(
+		cache_manager, amplicon_names, output_root, crispresso_dir,
+	)
 	end_split_reads = time.time() - start_split_reads
 	logging.info(f"Split Reads by Amplicon: {end_split_reads}")
 	mark_written(

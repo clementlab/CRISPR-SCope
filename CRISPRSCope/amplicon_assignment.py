@@ -43,6 +43,7 @@ from CRISPRSCope.cache import (
 	OutputRequirement,
 	large_file_fingerprint,
 	optional_file_fingerprint,
+	safe_remove_owned,
 	small_file_fingerprint,
 	tool_identity,
 )
@@ -97,6 +98,48 @@ def _split_cache_requirements(
 			strategy="stat", allow_empty=True, validator="bam",
 		))
 	return tuple(requirements)
+
+
+def _prune_obsolete_split_outputs(
+	cache_manager, previous_record, current_requirements, amp_file_dir,
+):
+	"""Remove old per-amplicon FASTQs only when a trusted split record owned them."""
+	if previous_record is None or cache_manager.config.mode.value == "disabled":
+		return []
+	current_paths = {
+		requirement.normalized_path() for requirement in current_requirements
+	}
+	removed = []
+	for output in previous_record.outputs:
+		key = str(output.get("key", ""))
+		if not key.startswith("reads:"):
+			continue
+		try:
+			amplicon_name, read = key[len("reads:"):].rsplit(":", 1)
+		except ValueError:
+			logging.warning("Ignoring malformed split cache output key during cleanup: %s", key)
+			continue
+		if read not in {"r1", "r2"}:
+			logging.warning("Ignoring unexpected split cache read key during cleanup: %s", key)
+			continue
+		expected = build_stage_filename(
+			stage=STAGE_SPLIT, tag="reads_all_cells", amplicon=amplicon_name,
+			read=read, ext="fq.gz", output_root=amp_file_dir,
+		)
+		if os.path.abspath(str(output.get("path", ""))) != os.path.abspath(expected):
+			logging.warning("Ignoring split cache output with unexpected path during cleanup: %s", key)
+			continue
+		if os.path.abspath(expected) in current_paths:
+			continue
+		try:
+			if safe_remove_owned(
+				expected, allowed_root=amp_file_dir,
+				expected_name=os.path.basename(expected),
+			):
+				removed.append(expected)
+		except ValueError as error:
+			logging.warning("Refusing unsafe stale split cleanup for %s: %s", key, error)
+	return removed
 
 
 def _build_split_cache_record(
@@ -584,7 +627,10 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 
 	info_file = output_root+".splitReads.ampliconInfo.txt"
 	cache_record = None
+	previous_split_record = None
 	if cache_manager is not None:
+		if cache_manager.config.mode.value != "disabled":
+			previous_split_record = cache_manager.load("split_reads")
 		cache_record = _build_split_cache_record(
 			cache_manager, aligned_bam, amplicon_file, alt_alleles_file,
 			bowtie2_index, primer_lookup_len, adapter_DNA,
@@ -1161,12 +1207,13 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 		safe_remove(aligned_amps_file, silent=True)
 
 	if cache_manager is not None:
-		cache_manager.commit(
-			cache_record,
-			_split_cache_requirements(
+		final_requirements = _split_cache_requirements(
 				output_root, amp_file_dir, info_file, amplicon_information,
 				debug_rescued_reads_bam, debug_rejected_rescue_reads_bam,
-			),
+			)
+		_prune_obsolete_split_outputs(
+			cache_manager, previous_split_record, final_requirements, amp_file_dir,
 		)
+		cache_manager.commit(cache_record, final_requirements)
 
 	return amplicon_names,amplicon_information,info_file

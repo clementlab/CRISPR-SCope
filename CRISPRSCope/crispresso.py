@@ -381,6 +381,110 @@ def _filter_selected_cache_requirements(output_root, amplicon_name):
 	)
 
 
+def prune_removed_amplicon_caches(
+	cache_manager, current_amplicons, output_root, crispresso_dir,
+):
+	"""Remove trusted cache records and stage-owned outputs for removed scopes."""
+	if cache_manager is None or cache_manager.config.mode.value == "disabled":
+		return []
+	active = set(current_amplicons)
+	amplicon_dir = output_root + ".seq_by_amplicon"
+	stage_roots = {
+		"crispresso_reads": crispresso_dir,
+		"parse_crispresso": crispresso_dir,
+		"filter_selected": amplicon_dir,
+		"crispresso_filtered": crispresso_dir + ".filtered",
+	}
+	removed = []
+	for stage, allowed_root in stage_roots.items():
+		for record in cache_manager.trusted_stage_records(stage):
+			amplicon_name = record.scope
+			if amplicon_name in active:
+				continue
+			if (
+				not amplicon_name
+				or amplicon_name in {".", ".."}
+				or os.path.basename(amplicon_name) != amplicon_name
+			):
+				logging.warning(
+					"Ignoring unsafe obsolete cache scope %r for stage %s",
+					amplicon_name, stage,
+				)
+				continue
+
+			if stage in {"crispresso_reads", "crispresso_filtered"}:
+				root = allowed_root
+				folder = os.path.join(root, "CRISPResso_on_" + amplicon_name)
+				targets = [
+					(folder, root, "CRISPResso_on_" + amplicon_name),
+					(os.path.join(root, amplicon_name + ".finished"), root, amplicon_name + ".finished"),
+					(os.path.join(root, amplicon_name + ".log"), root, amplicon_name + ".log"),
+				]
+				expected_record_paths = {
+					os.path.abspath(os.path.join(folder, "CRISPResso2_info.json")),
+					os.path.abspath(os.path.join(folder, "CRISPResso_output.fastq.gz")),
+					os.path.abspath(os.path.join(root, amplicon_name + ".finished")),
+				}
+			elif stage == "parse_crispresso":
+				folder = os.path.join(crispresso_dir, "CRISPResso_on_" + amplicon_name)
+				requirements = _parse_crispresso_cache_requirements(
+					output_root, amplicon_name, folder,
+				)
+				targets = []
+				for requirement in requirements:
+					target_root = (
+						amplicon_dir if requirement.key == "allele_fastq" else crispresso_dir
+					)
+					targets.append((
+						requirement.normalized_path(), target_root,
+						os.path.basename(requirement.path),
+					))
+				expected_record_paths = {
+					requirement.normalized_path() for requirement in requirements
+				}
+			else:
+				requirements = _filter_selected_cache_requirements(
+					output_root, amplicon_name,
+				)
+				targets = [
+					(requirement.normalized_path(), amplicon_dir, os.path.basename(requirement.path))
+					for requirement in requirements
+				]
+				expected_record_paths = {
+					requirement.normalized_path() for requirement in requirements
+				}
+
+			recorded_paths = {
+				os.path.abspath(str(item.get("path", "")))
+				for item in record.outputs
+			}
+			if not recorded_paths.issubset(expected_record_paths):
+				logging.warning(
+					"Ignoring cache record with unexpected output paths during stale cleanup: %s/%s",
+					stage, amplicon_name,
+				)
+				continue
+			try:
+				for target, target_root, expected_name in targets:
+					safe_remove_owned(
+						target, allowed_root=target_root,
+						expected_name=expected_name,
+					)
+				cache_manager.remove_record(record)
+			except ValueError as error:
+				logging.warning(
+					"Refusing unsafe stale cleanup for %s/%s: %s",
+					stage, amplicon_name, error,
+				)
+				continue
+			removed.append((stage, amplicon_name))
+			logging.info(
+				"Removed obsolete cache scope stage=%s scope=%s",
+				stage, amplicon_name,
+			)
+	return removed
+
+
 def _filter_amplicon_reads_with_cache(
 	output_root, parsed_information, amplicon_names, cell_quality_to_analyze,
 	n_processes, cache_manager,
