@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from CRISPRSCope import fastq_processing
+from CRISPRSCope import amplicon_assignment, fastq_processing
 from CRISPRSCope.cache import (
     CacheManager,
     OutputRequirement,
@@ -121,6 +121,118 @@ def test_parse_align_changed_parameter_invalidates_cache(tmp_path, monkeypatch):
             "TTTT",
             str(index),
             1,
+            cache_manager=manager,
+        )
+    assert manager.events[-1]["status"] == "invalid"
+
+
+def _seed_split_cache(tmp_path, monkeypatch):
+    output_root = str(tmp_path / "run")
+    amp_dir = tmp_path / "run.seq_by_amplicon"
+    amp_dir.mkdir()
+    aligned_bam = tmp_path / "aligned.bam"
+    aligned_bam.write_bytes(b"bam")
+    amplicons = tmp_path / "amplicons.tsv"
+    amplicons.write_text("ampA\tACGTACGT\tNA\n")
+    index = tmp_path / "genome"
+    (tmp_path / "genome.1.bt2").write_text("index")
+    info_file = tmp_path / "run.splitReads.ampliconInfo.txt"
+    r1 = amp_dir / "03_reads_all_cells.ampA.r1.fq.gz"
+    r2 = amp_dir / "03_reads_all_cells.ampA.r2.fq.gz"
+    import gzip
+
+    for path in (r1, r2):
+        with gzip.open(path, "wt") as handle:
+            handle.write("")
+    header = ["name", "aln_count", "reads_r1_file", "reads_r2_file"]
+    info_file.write_text(
+        "\t".join(header) + "\n" + f"ampA\t1\t{r1}\t{r2}\n"
+    )
+    (tmp_path / "run.splitReads.valid_amps.txt").write_text("ampA\t1\n")
+    (tmp_path / "run.splitReads.aligned.txt").write_text("Barcode\tAligned Count\ncellA\t1\n")
+    (tmp_path / "run.splitReads.unaligned.txt").write_text("Barcode\tUnaligned Count\n")
+    (tmp_path / "run.splitReads.amp_classification.txt").write_text(
+        "is_valid\tamp1_from_seq\tamp2_from_seq\tamp1_from_align\tamp2_from_align\n"
+    )
+    monkeypatch.setattr(amplicon_assignment, "tool_identity", _tool)
+    manager = CacheManager(output_root)
+    record = amplicon_assignment._build_split_cache_record(
+        manager,
+        str(aligned_bam),
+        str(amplicons),
+        "",
+        str(index),
+        18,
+        "ADAPTER",
+        10,
+        False,
+        "",
+        False,
+        "",
+        30.0,
+    )
+    information = {
+        "ampA": {
+            "name": "ampA",
+            "aln_count": "1",
+            "reads_r1_file": str(r1),
+            "reads_r2_file": str(r2),
+        }
+    }
+    requirements = amplicon_assignment._split_cache_requirements(
+        output_root, str(amp_dir), str(info_file), information
+    )
+    manager.commit(record, requirements)
+    return manager, aligned_bam, amplicons, index, amp_dir, output_root
+
+
+def test_split_cache_hit_uses_validated_amplicon_fastqs(tmp_path, monkeypatch):
+    manager, aligned_bam, amplicons, index, amp_dir, output_root = _seed_split_cache(
+        tmp_path, monkeypatch
+    )
+    names, information, _info = amplicon_assignment.split_reads_by_amplicon(
+        str(aligned_bam),
+        output_root,
+        str(amplicons),
+        "",
+        18,
+        str(amp_dir),
+        str(index),
+        "ADAPTER",
+        1,
+        False,
+        {"cellA": 1},
+        10,
+        cache_manager=manager,
+    )
+    assert names == ["ampA"]
+    assert information["ampA"]["reads_r1_file"].endswith(".fq.gz")
+    assert manager.events[-1]["status"] == "hit"
+
+
+def test_split_cache_changed_setting_recomputes(tmp_path, monkeypatch):
+    manager, aligned_bam, amplicons, index, amp_dir, output_root = _seed_split_cache(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(
+        amplicon_assignment.sb,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1),
+    )
+    with pytest.raises(Exception, match="External command failed"):
+        amplicon_assignment.split_reads_by_amplicon(
+            str(aligned_bam),
+            output_root,
+            str(amplicons),
+            "",
+            19,
+            str(amp_dir),
+            str(index),
+            "ADAPTER",
+            1,
+            False,
+            {"cellA": 1},
+            10,
             cache_manager=manager,
         )
     assert manager.events[-1]["status"] == "invalid"
