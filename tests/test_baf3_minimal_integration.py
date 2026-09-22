@@ -65,6 +65,9 @@ def test_baf3_minimal_fixture_matches_golden_baseline(tmp_path):
     output_manifest = json.loads((run_dir / "run.outputManifest.json").read_text())
     assert output_manifest["schema_version"] == 2
     assert output_manifest["status"] == "completed"
+    assert output_manifest["cache"]["mode"] == "auto"
+    assert output_manifest["cache"]["events"]
+    assert set(event["status"] for event in output_manifest["cache"]["events"]) == {"miss"}
     assert [artifact["key"] for artifact in output_manifest["artifacts"]] == [
         spec.key for spec in ARTIFACT_SPECS
     ]
@@ -127,3 +130,89 @@ def test_baf3_minimal_fixture_matches_golden_baseline(tmp_path):
         ".13_EditingRateObservedCenteredPermutationSwarm.png",
     ]:
         assert Path(str(output_root) + suffix).is_file()
+
+    cached_output_mtimes = {}
+    for record_path in sorted((run_dir / "run.cache").rglob("*.json")):
+        record = json.loads(record_path.read_text())
+        for output in record["outputs"]:
+            path = Path(output["path"])
+            cached_output_mtimes[str(path)] = path.stat().st_mtime_ns
+
+    subprocess.run(
+        [sys.executable, "-m", "CRISPRSCope.cli", "settings.txt"],
+        cwd=run_dir,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    warm_manifest = json.loads((run_dir / "run.outputManifest.json").read_text())
+    warm_cache = warm_manifest["cache"]
+    assert warm_manifest["status"] == "completed"
+    assert warm_cache["events"]
+    assert set(event["status"] for event in warm_cache["events"]) == {"hit"}
+    assert warm_cache["summary"]["hit"] == len(warm_cache["events"])
+    assert all(
+        warm_cache["summary"][status] == 0
+        for status in ("miss", "invalid", "refresh", "disabled")
+    )
+    assert {
+        path: Path(path).stat().st_mtime_ns for path in cached_output_mtimes
+    } == cached_output_mtimes
+    assert {name: _sha256(path) for name, path in output_files.items()} == golden["hashes"]
+
+    original_settings = settings_path.read_text()
+    settings_path.write_text(
+        original_settings.replace(
+            "editing_rate_ci_confidence_level\t0.95",
+            "editing_rate_ci_confidence_level\t0.90",
+        )
+    )
+    subprocess.run(
+        [sys.executable, "-m", "CRISPRSCope.cli", "settings.txt"],
+        cwd=run_dir,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    downstream_manifest = json.loads((run_dir / "run.outputManifest.json").read_text())
+    assert set(
+        event["status"] for event in downstream_manifest["cache"]["events"]
+    ) == {"hit"}
+
+    settings_path.write_text(
+        original_settings.replace("cache_mode\tauto", "cache_mode\trefresh")
+    )
+    subprocess.run(
+        [sys.executable, "-m", "CRISPRSCope.cli", "settings.txt"],
+        cwd=run_dir,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    refresh_manifest = json.loads((run_dir / "run.outputManifest.json").read_text())
+    assert set(event["status"] for event in refresh_manifest["cache"]["events"]) == {
+        "refresh"
+    }
+
+    cache_records_before_disabled = {
+        str(path): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in sorted((run_dir / "run.cache").rglob("*.json"))
+    }
+    settings_path.write_text(
+        original_settings.replace("cache_mode\tauto", "cache_mode\tdisabled")
+    )
+    subprocess.run(
+        [sys.executable, "-m", "CRISPRSCope.cli", "settings.txt"],
+        cwd=run_dir,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    disabled_manifest = json.loads((run_dir / "run.outputManifest.json").read_text())
+    assert set(event["status"] for event in disabled_manifest["cache"]["events"]) == {
+        "disabled"
+    }
+    assert {
+        str(path): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in sorted((run_dir / "run.cache").rglob("*.json"))
+    } == cache_records_before_disabled

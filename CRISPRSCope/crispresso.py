@@ -415,16 +415,26 @@ def prune_removed_amplicon_caches(
 			if stage in {"crispresso_reads", "crispresso_filtered"}:
 				root = allowed_root
 				folder = os.path.join(root, "CRISPResso_on_" + amplicon_name)
+				require_report = not bool(
+					record.parameters.get("suppress_sub_crispresso_plots", False)
+				)
 				targets = [
 					(folder, root, "CRISPResso_on_" + amplicon_name),
 					(os.path.join(root, amplicon_name + ".finished"), root, amplicon_name + ".finished"),
 					(os.path.join(root, amplicon_name + ".log"), root, amplicon_name + ".log"),
 				]
+				if require_report:
+					targets.append((
+						folder + ".html", root,
+						"CRISPResso_on_" + amplicon_name + ".html",
+					))
 				expected_record_paths = {
 					os.path.abspath(os.path.join(folder, "CRISPResso2_info.json")),
 					os.path.abspath(os.path.join(folder, "CRISPResso_output.fastq.gz")),
 					os.path.abspath(os.path.join(root, amplicon_name + ".finished")),
 				}
+				if require_report:
+					expected_record_paths.add(os.path.abspath(folder + ".html"))
 			elif stage == "parse_crispresso":
 				folder = os.path.join(crispresso_dir, "CRISPResso_on_" + amplicon_name)
 				requirements = _parse_crispresso_cache_requirements(
@@ -721,8 +731,10 @@ def _filtered_allele_fastq_path(output_root, amplicon_name):
 	)
 
 
-def _crispresso_cache_requirements(finished_file, crispresso_run_folder):
-	return (
+def _crispresso_cache_requirements(
+	finished_file, crispresso_run_folder, require_report=False,
+):
+	requirements = [
 		OutputRequirement(
 			"finished", finished_file, strategy="sha256", allow_empty=True,
 		),
@@ -736,7 +748,12 @@ def _crispresso_cache_requirements(finished_file, crispresso_run_folder):
 			os.path.join(crispresso_run_folder, "CRISPResso_output.fastq.gz"),
 			strategy="stat",
 		),
-	)
+	]
+	if require_report:
+		requirements.append(OutputRequirement(
+			"report", crispresso_run_folder + ".html", strategy="stat",
+		))
+	return tuple(requirements)
 
 
 def _build_crispresso_cache_record(
@@ -990,7 +1007,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 
 			if suppress_sub_crispresso_plots:
 				crispresso_args.extend(["--suppress_report", "--suppress_plots"])
-				crispresso_args.extend([
+			crispresso_args.extend([
 				"-o", crispresso_dir,
 				"-n", amplicon_name,
 				"-w", "2",
@@ -1014,7 +1031,10 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					cache_manager, amplicon_name, amplicon_information[amplicon_name],
 					suppress_sub_crispresso_plots, alleles, input_paths,
 				)
-				requirements = _crispresso_cache_requirements(finished_file, crispresso_run_folder)
+				requirements = _crispresso_cache_requirements(
+					finished_file, crispresso_run_folder,
+					require_report=not suppress_sub_crispresso_plots,
+				)
 				decision = cache_manager.evaluate(cache_record, requirements)
 				if decision.is_hit:
 					finished_count += 1

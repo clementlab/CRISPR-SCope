@@ -271,6 +271,7 @@ def _seed_crispresso_cache(tmp_path, monkeypatch, *, alleles=False):
     folder.mkdir()
     (folder / "CRISPResso2_info.json").write_text("{}\n")
     (folder / "CRISPResso_output.fastq.gz").write_text("fastq\n")
+    (run_dir / "CRISPResso_on_ampA.html").write_text("<html></html>\n")
     finished = run_dir / "ampA.finished"
     finished.write_text("")
     monkeypatch.setattr(crispresso, "tool_identity", _tool)
@@ -278,7 +279,12 @@ def _seed_crispresso_cache(tmp_path, monkeypatch, *, alleles=False):
     record = crispresso._build_crispresso_cache_record(
         manager, "ampA", information["ampA"], False, alleles, [str(path) for path in inputs]
     )
-    manager.commit(record, crispresso._crispresso_cache_requirements(str(finished), str(folder)))
+    manager.commit(
+        record,
+        crispresso._crispresso_cache_requirements(
+            str(finished), str(folder), require_report=True
+        ),
+    )
     return manager, information, output_root, base_dir, folder
 
 
@@ -324,12 +330,16 @@ def test_crispresso_changed_guide_clears_and_reruns_exact_amplicon(tmp_path, mon
             values = []
             for job in jobs:
                 assert "--no_rerun" not in job["args"]
+                assert job["args"][job["args"].index("-o") + 1] == str(base_dir)
+                assert job["args"][job["args"].index("-n") + 1] == "ampA"
                 assert not stale.exists()
                 os.makedirs(job["crispresso_run_folder"], exist_ok=True)
                 with open(os.path.join(job["crispresso_run_folder"], "CRISPResso2_info.json"), "w") as handle:
                     handle.write("{}\n")
                 with open(os.path.join(job["crispresso_run_folder"], "CRISPResso_output.fastq.gz"), "w") as handle:
                     handle.write("fastq\n")
+                with open(job["crispresso_run_folder"] + ".html", "w") as handle:
+                    handle.write("<html></html>\n")
                 with open(job["finished_file"], "w"):
                     pass
                 values.append({"returncode": 0, "error": None, "command": job["command"]})
