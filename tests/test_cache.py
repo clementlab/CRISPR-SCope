@@ -219,6 +219,22 @@ def test_safe_remove_owned_rejects_outside_paths_and_external_symlinks(tmp_path)
     assert outside.exists()
 
 
+def test_safe_remove_owned_accepts_equivalent_directory_aliases(tmp_path):
+    physical_root = tmp_path / "physical-root"
+    physical_root.mkdir()
+    alias_root = tmp_path / "alias-root"
+    alias_root.symlink_to(physical_root, target_is_directory=True)
+    candidate = alias_root / "expected.txt"
+    candidate.write_text("remove\n")
+
+    assert safe_remove_owned(
+        candidate,
+        allowed_root=physical_root,
+        expected_name="expected.txt",
+    )
+    assert not (physical_root / "expected.txt").exists()
+
+
 def test_trusted_stage_inventory_ignores_corrupt_and_misnamed_records(tmp_path, caplog):
     manager = CacheManager(str(tmp_path / "run"))
     trusted = manager.new_record("stage", "ampA", algorithm_version=1)

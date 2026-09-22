@@ -617,21 +617,19 @@ def safe_remove_owned(
     expected_name: str | None = None,
 ) -> bool:
     """Remove one exact stage-owned path without following it outside its root."""
-    candidate = Path(path)
-    root = Path(allowed_root).resolve()
-    lexical = Path(os.path.abspath(candidate))
+    candidate = Path(os.path.abspath(path))
+    root = Path(os.path.abspath(allowed_root)).resolve()
+    resolved = candidate.resolve(strict=False)
     try:
-        lexical.relative_to(Path(os.path.abspath(root)))
+        resolved.relative_to(root)
     except ValueError as error:
+        if candidate.is_symlink():
+            raise ValueError(
+                f"Refusing to remove symlink outside cache-owned root: {candidate}"
+            ) from error
         raise ValueError(f"Refusing to remove path outside cache-owned root: {candidate}") from error
     if expected_name is not None and candidate.name != expected_name:
         raise ValueError(f"Refusing to remove unexpected cache-owned name: {candidate.name}")
-    if candidate.is_symlink():
-        resolved = candidate.resolve(strict=False)
-        try:
-            resolved.relative_to(root)
-        except ValueError as error:
-            raise ValueError(f"Refusing to remove symlink outside cache-owned root: {candidate}") from error
     if not candidate.exists() and not candidate.is_symlink():
         return False
     if candidate.is_dir() and not candidate.is_symlink():
