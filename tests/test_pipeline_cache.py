@@ -270,8 +270,9 @@ def _seed_crispresso_cache(tmp_path, monkeypatch, *, alleles=False):
     folder = run_dir / "CRISPResso_on_ampA"
     folder.mkdir()
     (folder / "CRISPResso2_info.json").write_text("{}\n")
-    with gzip.open(folder / "CRISPResso_output.fastq.gz", "wt") as handle:
-        handle.write("fastq\n")
+    (folder / "CRISPResso_output.fastq.gz").write_text(
+        "@read\nACGT\n+\nIIII\n"
+    )
     (run_dir / "CRISPResso_on_ampA.html").write_text("<html></html>\n")
     finished = run_dir / "ampA.finished"
     finished.write_text("")

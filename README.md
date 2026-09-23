@@ -382,6 +382,9 @@ Cache validation avoids payload-size work for sequencing artifacts: FASTQs,
 BAMs, Bowtie2 indexes, and large CRISPResso outputs use resolved path, byte
 size, and nanosecond modification time. BAMs additionally undergo
 `samtools quickcheck`, and gzipped FASTQs receive a gzip magic-byte check.
+CRISPResso output FASTQs are accepted in either gzip form or as plain FASTQ,
+because supported CRISPResso releases may write plain text with a `.fastq.gz`
+suffix; this check reads only the format signature.
 Small control and summary files use SHA-256. Consequently, an external process
 that changes a large file while preserving both its size and modification time
 can evade validation; run with `cache_mode=refresh` when that is possible.

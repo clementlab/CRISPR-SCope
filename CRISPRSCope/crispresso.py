@@ -746,7 +746,7 @@ def _crispresso_cache_requirements(
 		OutputRequirement(
 			"crispresso_fastq",
 			os.path.join(crispresso_run_folder, "CRISPResso_output.fastq.gz"),
-			strategy="stat", validator="gzip",
+			strategy="stat", validator="fastq",
 		),
 	]
 	if require_report:
@@ -1084,6 +1084,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 	logging.info('Got ' + str(len(crispresso_commands)) + ' CRISPResso commands')
 
 	command_errors = []
+	cache_commit_errors = {}
 	if len(crispresso_commands) > 0:
 		# start processes
 		logging.info("Running on "+ str(n_processes) + " processes..")
@@ -1101,15 +1102,16 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 						cache_records[amplicon_name], cache_requirements[amplicon_name]
 					)
 				except Exception as error:
-					command_errors.append({
-						"command": job.get("command"),
-						"returncode": completed_job.get("returncode", 0),
-						"error": str(error),
-					})
+					cache_commit_errors[amplicon_name] = str(error)
 
 	for amplicon_name in amplicon_names:
 		if 'status' in crispresso_information[amplicon_name] and crispresso_information[amplicon_name]['status'] == 'Skipped':
 			pass
+		elif amplicon_name in cache_commit_errors:
+			crispresso_information[amplicon_name]['status'] = 'Failed'
+			crispresso_information[amplicon_name]['crispresso_result'] = (
+				"Cache validation failed: " + cache_commit_errors[amplicon_name]
+			)
 		else:
 			finished_file = crispresso_information[amplicon_name]['finished_file']
 			crispresso_info_file = os.path.join(crispresso_information[amplicon_name]['crispresso_run_folder'], 'CRISPResso2_info.json')
@@ -1151,6 +1153,12 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 			completed_job.get('command'), completed_job.get('returncode'),
 			context=completed_job.get('error'),
 		)
+	if cache_commit_errors:
+		details = "; ".join(
+			f"{amplicon_name}: {error}"
+			for amplicon_name, error in cache_commit_errors.items()
+		)
+		raise RuntimeError("Unable to commit CRISPResso cache record(s): " + details)
 	return crispresso_information
 
 

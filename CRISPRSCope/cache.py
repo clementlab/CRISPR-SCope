@@ -173,6 +173,14 @@ def _validate_output(requirement: OutputRequirement) -> str | None:
             with open(path, "rb") as handle:
                 if handle.read(2) != b"\x1f\x8b":
                     return "output_invalid_gzip"
+        elif requirement.validator == "fastq":
+            # CRISPResso may emit either gzip-compressed FASTQ or plain FASTQ
+            # with a historical .fastq.gz suffix.  Inspect only the format
+            # signature so validation remains independent of payload size.
+            with open(path, "rb") as handle:
+                signature = handle.read(2)
+            if signature != b"\x1f\x8b" and not signature.startswith(b"@"):
+                return "output_invalid_fastq"
         elif requirement.validator == "bam":
             completed = subprocess.run(
                 ["samtools", "quickcheck", path],

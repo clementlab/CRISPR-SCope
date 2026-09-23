@@ -368,7 +368,10 @@ Small control and summary files are fingerprinted with SHA-256. FASTQs, BAMs,
 Bowtie2 indexes, and large CRISPResso outputs use absolute path, byte size, and
 nanosecond modification time so cache validation does not reread their full
 payload. BAMs additionally undergo samtools quickcheck and gzip inputs receive
-a magic-byte check. The resulting limitation is that a same-size replacement
+a magic-byte check. CRISPResso FASTQ outputs additionally accept a plain FASTQ
+header because supported releases can write plain text under a .fastq.gz name;
+this format check reads only the first two bytes. The resulting limitation is
+that a same-size replacement
 whose modification time is deliberately preserved can evade validation; the
 refresh cache mode provides an explicit recovery path.
 

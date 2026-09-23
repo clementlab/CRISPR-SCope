@@ -180,6 +180,30 @@ def test_malformed_cell_counts_and_gzip_outputs_invalidate_cleanly(tmp_path):
     assert decision.reasons == ("output_invalid_gzip:fastq",)
 
 
+def test_fastq_validator_accepts_gzip_or_plain_crispresso_output(tmp_path):
+    manager = CacheManager(str(tmp_path / "run"))
+    plain = tmp_path / "plain.fastq.gz"
+    plain.write_text("@plain\nACGT\n+\nIIII\n")
+    compressed = tmp_path / "compressed.fastq.gz"
+    import gzip
+    with gzip.open(compressed, "wt") as handle:
+        handle.write("@gzip\nACGT\n+\nIIII\n")
+    requirements = (
+        OutputRequirement("plain", str(plain), strategy="stat", validator="fastq"),
+        OutputRequirement(
+            "compressed", str(compressed), strategy="stat", validator="fastq"
+        ),
+    )
+    record = manager.new_record("crispresso_fastq", algorithm_version=1)
+    manager.commit(record, requirements)
+    assert manager.evaluate(record, requirements).is_hit
+
+    plain.write_text("not a FASTQ\n")
+    decision = manager.evaluate(record, requirements)
+    assert decision.status == "invalid"
+    assert decision.reasons == ("output_invalid_fastq:plain",)
+
+
 def test_per_scope_record_paths_do_not_collide(tmp_path):
     manager = CacheManager(str(tmp_path / "run"))
     assert manager.record_path("stage", "amp/A") != manager.record_path("stage", "amp_A")
