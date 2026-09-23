@@ -116,13 +116,40 @@ def write_h5ad_output(output_root, settings_file, h5ad_output=None, h5ad_export_
 	return h5ad_output
 
 
+def _run_pipeline_with_manifest_finalization(manifest_observer=None):
+	"""Run and finalize the manifest while the caller still owns the run lock."""
+	active_manifest = None
+
+	def observe_manifest(manifest):
+		nonlocal active_manifest
+		active_manifest = manifest
+		if manifest_observer is not None:
+			manifest_observer(manifest)
+
+	try:
+		result = _run_pipeline_unlocked(observe_manifest)
+	except BaseException as error:
+		if active_manifest is not None:
+			active_manifest.fail(active_manifest.active_stage or "initialization", error)
+			try:
+				active_manifest.write()
+			except BaseException:
+				logging.exception("Failed to write output manifest after pipeline failure")
+		raise
+	else:
+		if active_manifest is not None:
+			active_manifest.complete()
+			active_manifest.write()
+		return result
+
+
 def run_pipeline(manifest_observer=None):
 	"""Resolve and lock the output root before entering the pipeline."""
 	if len(sys.argv) > 1 and sys.argv[1] in {"--version", "-V"}:
 		print(__version__)
 		return
 	if len(sys.argv) < 2:
-		return _run_pipeline_unlocked(manifest_observer)
+		return _run_pipeline_with_manifest_finalization(manifest_observer)
 	settings_file = os.path.abspath(sys.argv[1])
 	settings = _parse_settings_file(settings_file)
 	output_root = settings_file
@@ -130,7 +157,7 @@ def run_pipeline(manifest_observer=None):
 		output_root = _resolve_settings_path(settings["output_root"], os.path.dirname(settings_file))
 	output_root = validate_output_root(output_root)
 	with OutputRootLock(output_root):
-		return _run_pipeline_unlocked(manifest_observer)
+		return _run_pipeline_with_manifest_finalization(manifest_observer)
 
 
 def _run_pipeline_unlocked(manifest_observer=None):

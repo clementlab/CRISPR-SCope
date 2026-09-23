@@ -40,6 +40,8 @@ from upsetplot import UpSet
 from CRISPRSCope import __version__
 from CRISPRSCope.cache import (
 	OutputRequirement,
+	canonical_digest,
+	gzip_content_fingerprint,
 	large_file_fingerprint,
 	safe_remove_owned,
 	tool_identity,
@@ -315,10 +317,16 @@ def _barcode_set_sha256(barcodes):
 	return digest.hexdigest()
 
 
-def _existing_or_missing_large_fingerprint(path):
+def _existing_or_missing_large_fingerprint(path, *, gzip_content=False):
 	if os.path.isfile(path):
+		if gzip_content:
+			return gzip_content_fingerprint(path)
 		return large_file_fingerprint(path)
-	return {"path": os.path.abspath(path), "strategy": "stat", "missing": True}
+	return {
+		"path": os.path.realpath(path),
+		"strategy": "gzip_crc32" if gzip_content else "stat",
+		"missing": True,
+	}
 
 
 def _filter_selected_paths(output_root, amplicon_name):
@@ -354,7 +362,7 @@ def _filter_selected_paths(output_root, amplicon_name):
 def _build_filter_selected_cache_record(cache_manager, output_root, amplicon_name, barcode_hash):
 	paths = _filter_selected_paths(output_root, amplicon_name)
 	dependencies = []
-	for stage, scope in (("split_reads", "run"), ("parse_crispresso", amplicon_name)):
+	for stage, scope in (("parse_crispresso", amplicon_name),):
 		record = cache_manager.load(stage, scope)
 		if record is not None:
 			dependencies.append(cache_manager.dependency(record))
@@ -364,8 +372,12 @@ def _build_filter_selected_cache_record(cache_manager, output_root, amplicon_nam
 		algorithm_version=1,
 		dependencies=dependencies,
 		inputs={
-			"r1": _existing_or_missing_large_fingerprint(paths["input_r1"]),
-			"r2": _existing_or_missing_large_fingerprint(paths["input_r2"]),
+			"r1": _existing_or_missing_large_fingerprint(
+				paths["input_r1"], gzip_content=True,
+			),
+			"r2": _existing_or_missing_large_fingerprint(
+				paths["input_r2"], gzip_content=True,
+			),
 			"alleles": _existing_or_missing_large_fingerprint(paths["input_alleles"]),
 		},
 		parameters={"selected_barcodes_sha256": barcode_hash},
@@ -429,12 +441,12 @@ def prune_removed_amplicon_caches(
 						"CRISPResso_on_" + amplicon_name + ".html",
 					))
 				expected_record_paths = {
-					os.path.abspath(os.path.join(folder, "CRISPResso2_info.json")),
-					os.path.abspath(os.path.join(folder, "CRISPResso_output.fastq.gz")),
-					os.path.abspath(os.path.join(root, amplicon_name + ".finished")),
+					os.path.realpath(os.path.join(folder, "CRISPResso2_info.json")),
+					os.path.realpath(os.path.join(folder, "CRISPResso_output.fastq.gz")),
+					os.path.realpath(os.path.join(root, amplicon_name + ".finished")),
 				}
 				if require_report:
-					expected_record_paths.add(os.path.abspath(folder + ".html"))
+					expected_record_paths.add(os.path.realpath(folder + ".html"))
 			elif stage == "parse_crispresso":
 				folder = os.path.join(crispresso_dir, "CRISPResso_on_" + amplicon_name)
 				requirements = _parse_crispresso_cache_requirements(
@@ -465,7 +477,7 @@ def prune_removed_amplicon_caches(
 				}
 
 			recorded_paths = {
-				os.path.abspath(str(item.get("path", "")))
+				os.path.realpath(str(item.get("path", "")))
 				for item in record.outputs
 			}
 			if not recorded_paths.issubset(expected_record_paths):
@@ -764,14 +776,50 @@ def _build_crispresso_cache_record(
 	upstream_stage = "filter_selected" if alleles else "split_reads"
 	upstream_scope = amplicon_name if alleles else "run"
 	upstream = cache_manager.load(upstream_stage, upstream_scope)
-	dependencies = [cache_manager.dependency(upstream)] if upstream is not None else []
+	dependencies = []
+	if upstream is not None:
+		if alleles:
+			dependencies.append(cache_manager.dependency(upstream))
+		else:
+			output_keys = (
+				f"reads:{amplicon_name}:r1",
+				f"reads:{amplicon_name}:r2",
+			)
+			# The split record is run-wide, but CRISPResso consumes only one
+			# amplicon's reads.  Project its dependency key onto global split
+			# behavior plus this amplicon's definition.  The selected gzip
+			# output signatures below catch assignment changes caused by other
+			# amplicons without copying the complete split inventory N times.
+			projected_key = canonical_digest({
+				"schema_version": upstream.schema_version,
+				"stage": upstream.stage,
+				"algorithm_version": upstream.algorithm_version,
+				"dependencies": upstream.dependencies,
+				"inputs": {
+					key: upstream.inputs.get(key)
+					for key in ("aligned_bam", "bowtie2_index")
+				},
+				"parameters": upstream.parameters,
+				"tools": upstream.tools,
+				"amplicon": {
+					key: amplicon_info.get(key)
+					for key in (
+						"name", "input_amp_seqs", "input_alternate_allele_seqs",
+						"amp_seqs", "aln_chr", "aln_start", "aln_end",
+						"secondary_aln_chr", "secondary_aln_start", "secondary_aln_end",
+					)
+				},
+			})
+			dependencies.append(cache_manager.dependency(
+				upstream, output_keys, cache_key=projected_key,
+			))
 	return cache_manager.new_record(
 		stage,
 		amplicon_name,
 		algorithm_version=1,
 		dependencies=dependencies,
 		inputs={
-			"fastqs": [large_file_fingerprint(path) for path in input_paths],
+			"fastqs": [gzip_content_fingerprint(path) for path in input_paths],
 			"amplicon_sequences": amplicon_info["amp_seqs"],
 			"guide_sequence": _normalize_optional_guide(amplicon_info.get("guide_seq", "")),
 		},
@@ -1855,6 +1903,21 @@ def _build_parse_crispresso_cache_record(
 	)
 
 
+def _parse_crispresso_output_with_status(this_args):
+	"""Run one parser without allowing one amplicon to hide peer successes."""
+	amplicon_name = this_args["amplicon_name"]
+	try:
+		parse_one_crispresso_output(this_args)
+	except Exception as error:
+		return {
+			"amplicon_name": amplicon_name,
+			"error_type": type(error).__name__,
+			"error": str(error),
+			"traceback": traceback.format_exc(),
+		}
+	return {"amplicon_name": amplicon_name, "error": None}
+
+
 def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_file,crispresso_information,
 								output_root, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, n_processes,num_max_alleles=2,num_references=1,
 								min_num_reads_per_cell=5,min_allele_pct_cutoff=.1,min_allele_count_cutoff=2,
@@ -1961,21 +2024,51 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 
 	if len(parse_output_args) > 0:
 		logging.info('Parsing ' + str(len(parse_output_args)) + ' CRISPResso folders on ' + str(n_processes) + ' threads..')
-		# start processes
 		if n_processes > 1 and len(parse_output_args) > 1:
 			pool = mp.Pool(n_processes)
-			pool.map_async(parse_one_crispresso_output, parse_output_args).get(threading.TIMEOUT_MAX)
-			pool.close()
-			pool.join()
+			try:
+				parse_results = pool.map_async(
+					_parse_crispresso_output_with_status, parse_output_args,
+				).get(threading.TIMEOUT_MAX)
+			finally:
+				pool.close()
+				pool.join()
 		else:
-			for this_args in parse_output_args:
-				parse_one_crispresso_output(this_args)
-		if cache_manager is not None:
-			for this_args in parse_output_args:
-				name = this_args["amplicon_name"]
-				cache_manager.commit(
-					parse_cache_records[name], parse_cache_requirements[name]
+			parse_results = [
+				_parse_crispresso_output_with_status(this_args)
+				for this_args in parse_output_args
+			]
+
+		parse_errors = []
+		for result in parse_results:
+			name = result["amplicon_name"]
+			if result.get("error"):
+				logging.error(
+					"CRISPResso parser failed for %s (%s): %s\n%s",
+					name, result.get("error_type", "Exception"), result["error"],
+					result.get("traceback", ""),
 				)
+				parse_errors.append(result)
+				continue
+			if cache_manager is not None:
+				try:
+					cache_manager.commit(
+						parse_cache_records[name], parse_cache_requirements[name]
+					)
+				except Exception as error:
+					logging.error(
+						"Could not commit parsed-summary cache for %s: %s", name, error,
+					)
+					parse_errors.append({
+						"amplicon_name": name,
+						"error_type": type(error).__name__,
+						"error": str(error),
+					})
+		if parse_errors:
+			details = "; ".join(
+				f"{item['amplicon_name']}: {item['error']}" for item in parse_errors
+			)
+			raise RuntimeError("Failed to parse CRISPResso output(s): " + details)
 	else:
 		logging.info('Finished parsing CRISPResso folders')
 

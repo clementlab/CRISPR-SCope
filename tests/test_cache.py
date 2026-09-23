@@ -10,6 +10,7 @@ from CRISPRSCope.cache import (
     OutputRequirement,
     OutputRootLock,
     canonical_digest,
+    gzip_content_fingerprint,
     large_file_fingerprint,
     safe_remove_owned,
     small_file_fingerprint,
@@ -45,6 +46,40 @@ def test_small_and_large_fingerprints_use_declared_strategies(tmp_path, monkeypa
     assert fingerprint["strategy"] == "stat"
     assert fingerprint["size"] == 5
     assert "sha256" not in fingerprint
+
+
+def test_path_fingerprints_are_stable_across_equivalent_directory_aliases(tmp_path):
+    physical = tmp_path / "physical"
+    physical.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(physical, target_is_directory=True)
+    (physical / "input.txt").write_text("content\n")
+
+    physical_fingerprint = small_file_fingerprint(physical / "input.txt")
+    alias_fingerprint = small_file_fingerprint(alias / "input.txt")
+
+    assert alias_fingerprint == physical_fingerprint
+    assert CacheManager(str(alias / "run")).cache_root == str(physical / "run.cache")
+    assert OutputRequirement("out", str(alias / "out.txt")).normalized_path() == str(
+        physical / "out.txt"
+    )
+
+
+def test_gzip_content_fingerprint_ignores_mtime_but_detects_content(tmp_path):
+    import gzip
+
+    path = tmp_path / "reads.fq.gz"
+    with gzip.open(path, "wt") as handle:
+        handle.write("@read\nACGT\n+\nIIII\n")
+    first = gzip_content_fingerprint(path)
+
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    assert gzip_content_fingerprint(path) == first
+
+    with gzip.open(path, "wt") as handle:
+        handle.write("@read\nTGCA\n+\nIIII\n")
+    assert gzip_content_fingerprint(path)["crc32"] != first["crc32"]
 
 
 def test_tool_identity_is_resolved_once_per_process(monkeypatch):

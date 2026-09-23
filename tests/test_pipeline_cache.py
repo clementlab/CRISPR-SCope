@@ -256,7 +256,8 @@ def _seed_crispresso_cache(tmp_path, monkeypatch, *, alleles=False):
             amp_dir / "03_reads_all_cells.ampA.r2.fq.gz",
         ]
     for path in inputs:
-        path.write_text("fastq\n")
+        with gzip.open(path, "wt") as handle:
+            handle.write("@read\nACGT\n+\nIIII\n")
     information = {
         "ampA": {
             "name": "ampA",
@@ -316,6 +317,59 @@ def test_crispresso_per_amplicon_cache_hits_without_running(tmp_path, monkeypatc
     assert manager.events[-1]["status"] == "hit"
 
 
+def test_first_pass_dependency_projects_run_wide_split_to_one_amplicon(
+    tmp_path, monkeypatch,
+):
+    manager, _bam, amplicons, index, amp_dir, output_root = _seed_split_cache(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(crispresso, "tool_identity", _tool)
+    r1 = amp_dir / "03_reads_all_cells.ampA.r1.fq.gz"
+    r2 = amp_dir / "03_reads_all_cells.ampA.r2.fq.gz"
+    amp_info = {
+        "name": "ampA",
+        "input_amp_seqs": "ACGTACGT",
+        "input_alternate_allele_seqs": "NA",
+        "amp_seqs": "ACGTACGT",
+        "guide_seq": "",
+    }
+    before = crispresso._build_crispresso_cache_record(
+        manager, "ampA", amp_info, False, False, [str(r1), str(r2)]
+    )
+
+    # Simulate adding another amplicon and a complete split rerun that emits
+    # byte-equivalent ampA reads with a new filesystem modification time.
+    amplicons.write_text("ampA\tACGTACGT\tNA\nampB\tTGCATGCA\tNA\n")
+    for path in (r1, r2):
+        with gzip.open(path, "wt") as handle:
+            handle.write("")
+    split_record = amplicon_assignment._build_split_cache_record(
+        manager, str(tmp_path / "aligned.bam"), str(amplicons), "", str(index),
+        18, "ADAPTER", 10, False, "", False, "", 30.0,
+    )
+    split_info = {
+        "ampA": {
+            "name": "ampA", "aln_count": "1",
+            "reads_r1_file": str(r1), "reads_r2_file": str(r2),
+        }
+    }
+    manager.commit(
+        split_record,
+        amplicon_assignment._split_cache_requirements(
+            output_root, str(amp_dir), str(tmp_path / "run.splitReads.ampliconInfo.txt"),
+            split_info,
+        ),
+    )
+    after = crispresso._build_crispresso_cache_record(
+        manager, "ampA", amp_info, False, False, [str(r1), str(r2)]
+    )
+
+    assert after.cache_key == before.cache_key
+    assert set(after.dependencies[0]["outputs"]) == {
+        "reads:ampA:r1", "reads:ampA:r2",
+    }
+
+
 def test_crispresso_changed_guide_clears_and_reruns_exact_amplicon(tmp_path, monkeypatch):
     manager, information, output_root, base_dir, folder = _seed_crispresso_cache(
         tmp_path, monkeypatch, alleles=False
@@ -372,8 +426,9 @@ def test_crispresso_commits_later_success_after_incomplete_amplicon(tmp_path, mo
     for amp in ("ampA", "ampB"):
         r1 = amp_dir / f"{amp}.r1.fq.gz"
         r2 = amp_dir / f"{amp}.r2.fq.gz"
-        r1.write_text("reads\n")
-        r2.write_text("reads\n")
+        for path in (r1, r2):
+            with gzip.open(path, "wt") as handle:
+                handle.write("@read\nACGT\n+\nIIII\n")
         information[amp] = {
             "name": amp, "aln_count": "1", "reads_r1_file": str(r1),
             "reads_r2_file": str(r2), "amp_seqs": "ACGT", "guide_seq": "",
@@ -490,6 +545,69 @@ def test_parse_crispresso_setting_change_invalidates(tmp_path, monkeypatch):
             cache_manager=manager,
         )
     assert manager.events[-1]["status"] == "invalid"
+
+
+def test_parse_crispresso_commits_successes_before_reporting_peer_failure(
+    tmp_path, monkeypatch,
+):
+    output_root = str(tmp_path / "run")
+    (tmp_path / "run.seq_by_amplicon").mkdir()
+    amp_info = {}
+    crispresso_information = {}
+    for amp in ("ampA", "ampB"):
+        folder = tmp_path / f"CRISPResso_on_{amp}"
+        folder.mkdir()
+        (folder / "CRISPResso_output.fastq.gz").write_text("fastq\n")
+        amp_info[amp] = {"amp_seqs": "ACGT", "input_ref_allele_counts": "1"}
+        crispresso_information[amp] = {
+            "status": "Completed", "crispresso_run_folder": str(folder),
+        }
+
+    def parse_one(args):
+        amp = args["amplicon_name"]
+        if amp == "ampA":
+            raise RuntimeError("simulated parse failure")
+        folder = args["crispresso_run_folder"]
+        with open(folder + ".summ", "w") as handle:
+            handle.write("cell\tall_cell_read_count\n")
+        for suffix in (".summarize_indels.out", ".summarize_alleles.out"):
+            with open(folder + suffix, "w") as handle:
+                handle.write("cell\tread_count\n")
+        with open(folder + ".summ.finished", "w") as handle:
+            handle.write("Total reads\t0\n")
+        allele_path = crispresso._parse_crispresso_cache_requirements(
+            output_root, amp, folder,
+        )[3].path
+        with open(allele_path, "w"):
+            pass
+
+    monkeypatch.setattr(crispresso, "parse_one_crispresso_output", parse_one)
+
+    class Pool:
+        def __init__(self, *_args):
+            pass
+
+        def map_async(self, function, args):
+            return SimpleNamespace(get=lambda *_args: [function(item) for item in args])
+
+        def close(self):
+            pass
+
+        def join(self):
+            pass
+
+    monkeypatch.setattr(crispresso.mp, "Pool", Pool)
+    manager = CacheManager(output_root)
+
+    with pytest.raises(RuntimeError, match="ampA: simulated parse failure"):
+        crispresso.parse_crispresso_outputs(
+            ["ampA", "ampB"], amp_info, str(tmp_path / "unused.tsv"),
+            crispresso_information, output_root, 0, 0, 2,
+            cache_manager=manager,
+        )
+
+    assert manager.load("parse_crispresso", "ampA") is None
+    assert manager.load("parse_crispresso", "ampB") is not None
 
 
 def _seed_filter_selected_cache(tmp_path):

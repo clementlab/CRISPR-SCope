@@ -84,7 +84,7 @@ def _split_cache_requirements(
 				read=read, ext="fq.gz", output_root=amp_file_dir,
 			)
 			requirements.append(OutputRequirement(
-				f"reads:{amp_name}:{read}", path, strategy="stat", allow_empty=True,
+				f"reads:{amp_name}:{read}", path, strategy="gzip_crc32", allow_empty=True,
 				validator="gzip",
 			))
 	if debug_rescued_reads_bam:
@@ -126,10 +126,10 @@ def _prune_obsolete_split_outputs(
 			stage=STAGE_SPLIT, tag="reads_all_cells", amplicon=amplicon_name,
 			read=read, ext="fq.gz", output_root=amp_file_dir,
 		)
-		if os.path.abspath(str(output.get("path", ""))) != os.path.abspath(expected):
+		if os.path.realpath(str(output.get("path", ""))) != os.path.realpath(expected):
 			logging.warning("Ignoring split cache output with unexpected path during cleanup: %s", key)
 			continue
-		if os.path.abspath(expected) in current_paths:
+		if os.path.realpath(expected) in current_paths:
 			continue
 		try:
 			if safe_remove_owned(
@@ -172,9 +172,9 @@ def _build_split_cache_record(
 			"adapter_DNA": adapter_DNA,
 			"min_total_reads_per_barcode": int(min_total_reads_per_barcode),
 			"assign_reads_to_all_possible_amplicons": bool(assign_reads_to_all_possible_amplicons),
-			"debug_rescued_reads_bam": os.path.abspath(debug_rescued_reads_bam) if debug_rescued_reads_bam else "",
+			"debug_rescued_reads_bam": os.path.realpath(debug_rescued_reads_bam) if debug_rescued_reads_bam else "",
 			"debug_require_strict_amplicon_alignment": bool(debug_require_strict_amplicon_alignment),
-			"debug_rejected_rescue_reads_bam": os.path.abspath(debug_rejected_rescue_reads_bam) if debug_rejected_rescue_reads_bam else "",
+			"debug_rejected_rescue_reads_bam": os.path.realpath(debug_rejected_rescue_reads_bam) if debug_rejected_rescue_reads_bam else "",
 			"partial_rescue_min_mean_read_quality": float(partial_rescue_min_mean_read_quality),
 		},
 		tools={

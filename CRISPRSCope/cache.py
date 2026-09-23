@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -87,7 +88,8 @@ def canonical_digest(value: object) -> str:
 
 
 def _absolute_path(path: os.PathLike[str] | str) -> str:
-    return os.path.abspath(os.fspath(path))
+    """Return one canonical spelling for a path, including symlink aliases."""
+    return os.path.realpath(os.path.abspath(os.fspath(path)))
 
 
 def small_file_fingerprint(path: os.PathLike[str] | str) -> dict[str, object]:
@@ -115,6 +117,32 @@ def large_file_fingerprint(path: os.PathLike[str] | str) -> dict[str, object]:
         "strategy": "stat",
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def gzip_content_fingerprint(path: os.PathLike[str] | str) -> dict[str, object]:
+    """Fingerprint gzip content in constant time using its RFC 1952 trailer.
+
+    Split FASTQs are regenerated as complete single-member gzip files.  Their
+    CRC32 and uncompressed size therefore provide a stable content signature
+    without rereading the sequencing payload.  Compressed size is retained as
+    an additional guard against corruption or accidental substitution.
+    """
+    absolute = _absolute_path(path)
+    stat = os.stat(absolute)
+    if stat.st_size < 18:
+        raise ValueError(f"Gzip file is too short to contain a valid trailer: {absolute}")
+    with open(absolute, "rb") as handle:
+        if handle.read(2) != b"\x1f\x8b":
+            raise ValueError(f"File does not have a gzip signature: {absolute}")
+        handle.seek(-8, os.SEEK_END)
+        crc32, uncompressed_size = struct.unpack("<II", handle.read(8))
+    return {
+        "path": absolute,
+        "strategy": "gzip_crc32",
+        "size": stat.st_size,
+        "crc32": f"{crc32:08x}",
+        "uncompressed_size": uncompressed_size,
     }
 
 
@@ -171,7 +199,10 @@ def _validate_output(requirement: OutputRequirement) -> str | None:
                 json.load(handle)
         elif requirement.validator == "gzip":
             with open(path, "rb") as handle:
-                if handle.read(2) != b"\x1f\x8b":
+                if handle.read(2) != b"\x1f\x8b" or (
+                    requirement.strategy == "gzip_crc32"
+                    and os.path.getsize(path) < 18
+                ):
                     return "output_invalid_gzip"
         elif requirement.validator == "fastq":
             # CRISPResso may emit either gzip-compressed FASTQ or plain FASTQ
@@ -214,6 +245,8 @@ def _fingerprint_requirement(requirement: OutputRequirement) -> dict[str, object
         fingerprint = small_file_fingerprint(requirement.path)
     elif requirement.strategy == "stat":
         fingerprint = large_file_fingerprint(requirement.path)
+    elif requirement.strategy == "gzip_crc32":
+        fingerprint = gzip_content_fingerprint(requirement.path)
     else:
         raise ValueError(f"Unknown output fingerprint strategy: {requirement.strategy}")
     return {
@@ -503,11 +536,14 @@ class CacheManager:
                     reasons_list.append(f"{validation_error}:{requirement.key}")
                     break
                 current = _fingerprint_requirement(requirement)
-                comparable_keys = (
-                    ("path", "strategy", "size", "sha256")
-                    if requirement.strategy == "sha256"
-                    else ("path", "strategy", "size", "mtime_ns")
-                )
+                if requirement.strategy == "sha256":
+                    comparable_keys = ("path", "strategy", "size", "sha256")
+                elif requirement.strategy == "gzip_crc32":
+                    comparable_keys = (
+                        "path", "strategy", "size", "crc32", "uncompressed_size",
+                    )
+                else:
+                    comparable_keys = ("path", "strategy", "size", "mtime_ns")
                 if any(cached_output.get(key) != current.get(key) for key in comparable_keys):
                     reasons_list.append(f"output_changed:{requirement.key}")
                     break
@@ -545,13 +581,21 @@ class CacheManager:
         return record
 
     @staticmethod
-    def dependency(record: CacheRecord, output_keys: Iterable[str] | None = None) -> dict[str, object]:
+    def dependency(
+        record: CacheRecord,
+        output_keys: Iterable[str] | None = None,
+        *,
+        cache_key: str | None = None,
+    ) -> dict[str, object]:
         selected = set(output_keys) if output_keys is not None else None
         outputs = {
             str(item["key"]): {
                 key: value
                 for key, value in item.items()
-                if key in {"path", "strategy", "size", "mtime_ns", "sha256"}
+                if key in {
+                    "path", "strategy", "size", "mtime_ns", "sha256",
+                    "crc32", "uncompressed_size",
+                }
             }
             for item in record.outputs
             if selected is None or item.get("key") in selected
@@ -559,7 +603,7 @@ class CacheManager:
         return {
             "stage": record.stage,
             "scope": record.scope,
-            "cache_key": record.cache_key,
+            "cache_key": cache_key or record.cache_key,
             "outputs": outputs,
         }
 

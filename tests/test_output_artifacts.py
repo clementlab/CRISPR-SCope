@@ -219,3 +219,67 @@ def test_cli_main_does_not_write_manifest_without_an_active_manifest(tmp_path, m
     monkeypatch.setattr(cli, "_main_impl", lambda: None)
     assert cli.main() is None
     assert not list(tmp_path.glob("*.outputManifest.json"))
+
+
+def test_pipeline_holds_output_lock_through_manifest_finalization(tmp_path, monkeypatch):
+    from CRISPRSCope import pipeline
+
+    state = {"locked": False, "writes": 0}
+
+    class TrackingLock:
+        def __init__(self, output_root):
+            assert output_root == str(tmp_path / "settings.txt")
+
+        def __enter__(self):
+            state["locked"] = True
+            return self
+
+        def __exit__(self, *_args):
+            state["locked"] = False
+
+    class Manifest:
+        status = "running"
+        active_stage = "final_outputs"
+
+        def complete(self):
+            assert state["locked"]
+            self.status = "completed"
+
+        def fail(self, _stage, _error):
+            assert state["locked"]
+            self.status = "failed"
+
+        def write(self):
+            assert state["locked"]
+            state["writes"] += 1
+
+    manifest = Manifest()
+
+    def run_unlocked(observer):
+        assert state["locked"]
+        observer(manifest)
+        return "finished"
+
+    monkeypatch.setattr(pipeline, "OutputRootLock", TrackingLock)
+    monkeypatch.setattr(pipeline, "_parse_settings_file", lambda _path: {})
+    monkeypatch.setattr(pipeline, "validate_output_root", lambda path: path)
+    monkeypatch.setattr(pipeline, "_run_pipeline_unlocked", run_unlocked)
+    monkeypatch.setattr(
+        pipeline.sys, "argv", ["CRISPRSCope", str(tmp_path / "settings.txt")]
+    )
+
+    assert pipeline.run_pipeline() == "finished"
+    assert state == {"locked": False, "writes": 1}
+
+    failed_manifest = Manifest()
+
+    def fail_unlocked(observer):
+        assert state["locked"]
+        observer(failed_manifest)
+        raise RuntimeError("pipeline failed")
+
+    monkeypatch.setattr(pipeline, "_run_pipeline_unlocked", fail_unlocked)
+    with pytest.raises(RuntimeError, match="pipeline failed"):
+        pipeline.run_pipeline()
+    assert failed_manifest.status == "failed"
+    assert state == {"locked": False, "writes": 2}

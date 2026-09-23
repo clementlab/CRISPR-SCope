@@ -378,16 +378,22 @@ to recompute without consulting or changing cache records. Old `.finished`,
 but cannot create a cache hit without a current JSON record. Runs created before
 this cache format therefore incur one conservative recomputation.
 
-Cache validation avoids payload-size work for sequencing artifacts: FASTQs,
-BAMs, Bowtie2 indexes, and large CRISPResso outputs use resolved path, byte
-size, and nanosecond modification time. BAMs additionally undergo
-`samtools quickcheck`, and gzipped FASTQs receive a gzip magic-byte check.
+Cache validation avoids payload-size work for sequencing artifacts. Raw input
+FASTQs, BAMs, Bowtie2 indexes, and large CRISPResso outputs use resolved path,
+byte size, and nanosecond modification time. Per-amplicon gzip FASTQs produced
+by read splitting use resolved path, compressed size, and the gzip trailer's
+CRC32 and uncompressed size. This constant-time signature allows an unchanged
+amplicon to remain cached after a run-wide split rerun while reading only the
+gzip header and trailer. BAMs additionally undergo `samtools quickcheck`, and
+gzipped FASTQs receive a gzip magic-byte check.
 CRISPResso output FASTQs are accepted in either gzip form or as plain FASTQ,
 because supported CRISPResso releases may write plain text with a `.fastq.gz`
 suffix; this check reads only the format signature.
 Small control and summary files use SHA-256. Consequently, an external process
-that changes a large file while preserving both its size and modification time
-can evade validation; run with `cache_mode=refresh` when that is possible.
+that changes a stat-fingerprinted large file while preserving both its size and
+modification time can evade validation. The gzip trailer signature is also not
+a cryptographic content digest. Run with `cache_mode=refresh` when either case
+is possible.
 
 Only one process may use a given output root at a time. CRISPRSCope acquires a
 non-blocking `<output_root>.cache.lock`; contention fails immediately and does
