@@ -7,6 +7,7 @@ constant1	GTACGTACGAGTC
 constant2	GTACTCGCAGTAGTC
 output_root	run
 processes	1
+cache_mode	auto
 allowBarcodeMismatches	False
 primer_lookup_len	18
 adapter_DNA	TGTCTCTTATACACATCTCCGAGCCCACGAG

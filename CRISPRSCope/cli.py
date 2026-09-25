@@ -68,6 +68,7 @@ from .settings import (
     _parse_float_setting,
     _parse_int_setting,
     _parse_settings_file,
+    _parse_cache_config,
     _resolve_existing_fastq_path,
     _resolve_settings_path,
     _resolve_settings_path_list,
@@ -109,7 +110,10 @@ def main():
         result = _main_impl()
     except BaseException as error:
         manifest = _ACTIVE_OUTPUT_MANIFEST
-        if manifest is not None:
+        # Normal pipeline runs finalize under the output-root lock.  Retain
+        # this fallback for compatibility callers and tests that replace
+        # ``_main_impl`` and leave a still-running manifest behind.
+        if manifest is not None and manifest.status == "running":
             manifest.fail(manifest.active_stage or "initialization", error)
             try:
                 manifest.write()
@@ -119,7 +123,7 @@ def main():
         raise
     else:
         manifest = _ACTIVE_OUTPUT_MANIFEST
-        if manifest is not None:
+        if manifest is not None and manifest.status == "running":
             manifest.complete()
             manifest.write()
         return result

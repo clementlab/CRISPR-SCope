@@ -357,15 +357,29 @@ unedited zero. All-missing amplicons are excluded from the usable-amplicon set
 used for supported-breadth scoring, preventing a failed analysis from lowering
 every barcode's score.
 
-The amplicon-score table is regenerated on every run. The selected barcode set
-used for second-pass filtering is stored as a deterministic SHA-256 digest. If
-that set changes, filtered read and allele FASTQs are regenerated; the digest
-is retained only after all filtering stages succeed.
+The amplicon-score table and all downstream aggregate outputs are regenerated
+on every run. Expensive processing stages use versioned JSON records under
+<output_root>.cache. Parse/alignment and read splitting are run-wide records;
+both CRISPResso passes, CRISPResso parsing, and selected-cell filtering use
+independent per-amplicon records. Legacy marker, TSV, and barcode-digest files
+are diagnostic only and cannot independently authorize reuse.
 
-For filtered, allele-mode CRISPResso runs, the cache records a SHA-256 digest of
-the decompressed allele FASTQ input. A changed or missing input, a previous
-failure, or missing completion output invalidates the cached result. Stale
-filtered CRISPResso outputs are removed before the affected amplicon is rerun.
+Small control and summary files are fingerprinted with SHA-256. FASTQs, BAMs,
+Bowtie2 indexes, and large CRISPResso outputs use absolute path, byte size, and
+nanosecond modification time so cache validation does not reread their full
+payload. BAMs additionally undergo samtools quickcheck and gzip inputs receive
+a magic-byte check. CRISPResso FASTQ outputs additionally accept a plain FASTQ
+header because supported releases can write plain text under a .fastq.gz name;
+this format check reads only the first two bytes. The resulting limitation is
+that a same-size replacement
+whose modification time is deliberately preserved can evade validation; the
+refresh cache mode provides an explicit recovery path.
+
+Selected-cell filtering keys each amplicon by the effective sorted barcode-set
+digest and by its source read and allele fingerprints. A record is committed
+only after both read and allele filtering succeed. Filtered CRISPResso is keyed
+from that record and the filtered allele FASTQ metadata. Missing outputs,
+previous failures, and interrupted work cannot produce a hit.
 
 Filtered editing summaries use the second-pass filtered CRISPResso
 classification while retaining the corresponding original allele-support

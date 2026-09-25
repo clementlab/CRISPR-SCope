@@ -10,6 +10,7 @@ bowtie2_index	refs/Bowtie2Index/genome
 constant1	GTACGTACGAGTC
 constant2	GTACTCGCAGTAGTC
 processes	10
+cache_mode	auto
 primer_lookup_len	18
 adapter_DNA	TGTCTCTTATACACATCTCCGAGCCCACGAG
 allowBarcodeMismatches	False

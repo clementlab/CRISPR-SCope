@@ -75,8 +75,13 @@ def test_manifest_records_completed_and_failed_runs_atomically(tmp_path):
     manifest_path = manifest.write()
 
     payload = json.loads(open(manifest_path, encoding="utf-8").read())
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["status"] == "completed"
+    assert payload["cache"] == {
+        "mode": "auto",
+        "summary": {"hit": 0, "miss": 0, "invalid": 0, "refresh": 0, "disabled": 0},
+        "events": [],
+    }
     assert [artifact["key"] for artifact in payload["artifacts"]][:2] == [
         "editing_summary",
         "filtered_editing_summary",
@@ -102,6 +107,29 @@ def test_manifest_records_completed_and_failed_runs_atomically(tmp_path):
         "type": "ValueError",
         "message": "simulated failure",
     }
+
+
+def test_manifest_reports_cache_mode_summary_and_ordered_events(tmp_path):
+    manifest = OutputManifest(OutputContext(str(tmp_path / "run")))
+    manifest.configure_cache("refresh")
+    manifest.record_cache_event({
+        "stage": "parse_align", "scope": "run", "status": "refresh",
+        "reasons": ["refresh_requested"], "cache_key": "key-a",
+    })
+    manifest.record_cache_event({
+        "stage": "split_reads", "scope": "run", "status": "miss",
+        "reasons": ["record_missing"], "cache_key": "key-b",
+    })
+
+    cache = manifest.as_dict()["cache"]
+
+    assert cache["mode"] == "refresh"
+    assert cache["summary"] == {
+        "hit": 0, "miss": 1, "invalid": 0, "refresh": 1, "disabled": 0,
+    }
+    assert [event["stage"] for event in cache["events"]] == [
+        "parse_align", "split_reads",
+    ]
 
 
 def test_cli_main_writes_requested_manifest_on_success_and_preserves_failure(tmp_path, monkeypatch):
@@ -191,3 +219,67 @@ def test_cli_main_does_not_write_manifest_without_an_active_manifest(tmp_path, m
     monkeypatch.setattr(cli, "_main_impl", lambda: None)
     assert cli.main() is None
     assert not list(tmp_path.glob("*.outputManifest.json"))
+
+
+def test_pipeline_holds_output_lock_through_manifest_finalization(tmp_path, monkeypatch):
+    from CRISPRSCope import pipeline
+
+    state = {"locked": False, "writes": 0}
+
+    class TrackingLock:
+        def __init__(self, output_root):
+            assert output_root == str(tmp_path / "settings.txt")
+
+        def __enter__(self):
+            state["locked"] = True
+            return self
+
+        def __exit__(self, *_args):
+            state["locked"] = False
+
+    class Manifest:
+        status = "running"
+        active_stage = "final_outputs"
+
+        def complete(self):
+            assert state["locked"]
+            self.status = "completed"
+
+        def fail(self, _stage, _error):
+            assert state["locked"]
+            self.status = "failed"
+
+        def write(self):
+            assert state["locked"]
+            state["writes"] += 1
+
+    manifest = Manifest()
+
+    def run_unlocked(observer):
+        assert state["locked"]
+        observer(manifest)
+        return "finished"
+
+    monkeypatch.setattr(pipeline, "OutputRootLock", TrackingLock)
+    monkeypatch.setattr(pipeline, "_parse_settings_file", lambda _path: {})
+    monkeypatch.setattr(pipeline, "validate_output_root", lambda path: path)
+    monkeypatch.setattr(pipeline, "_run_pipeline_unlocked", run_unlocked)
+    monkeypatch.setattr(
+        pipeline.sys, "argv", ["CRISPRSCope", str(tmp_path / "settings.txt")]
+    )
+
+    assert pipeline.run_pipeline() == "finished"
+    assert state == {"locked": False, "writes": 1}
+
+    failed_manifest = Manifest()
+
+    def fail_unlocked(observer):
+        assert state["locked"]
+        observer(failed_manifest)
+        raise RuntimeError("pipeline failed")
+
+    monkeypatch.setattr(pipeline, "_run_pipeline_unlocked", fail_unlocked)
+    with pytest.raises(RuntimeError, match="pipeline failed"):
+        pipeline.run_pipeline()
+    assert failed_manifest.status == "failed"
+    assert state == {"locked": False, "writes": 2}

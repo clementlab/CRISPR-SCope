@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import errno
+import glob
 import gzip
 import hashlib
 import json
@@ -38,6 +39,14 @@ from scipy.stats import multinomial
 from upsetplot import UpSet
 
 from CRISPRSCope import __version__
+from CRISPRSCope.cache import (
+	OutputRequirement,
+	large_file_fingerprint,
+	optional_file_fingerprint,
+	safe_remove_owned,
+	small_file_fingerprint,
+	tool_identity,
+)
 from CRISPRSCope.io_utils import open_text_maybe_gzip
 from CRISPRSCope.output_artifacts import OutputContext, OutputManifest
 
@@ -52,6 +61,127 @@ from .paths import (
 	safe_write_path,
 )
 from .settings import PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT, _resolve_existing_fastq_path
+
+
+def _split_cache_requirements(
+	output_root, amp_file_dir, info_file, amplicon_information=None,
+	debug_rescued_reads_bam="", debug_rejected_rescue_reads_bam="",
+):
+	outputs = OutputContext(output_root)
+	requirements = [
+		OutputRequirement("amplicon_info", info_file, strategy="sha256", validator="tsv", required_header=("name",)),
+		OutputRequirement("valid_amplicons", outputs.path("valid_amplicons"), strategy="sha256", allow_empty=True),
+		OutputRequirement("aligned_read_counts", outputs.path("aligned_read_counts"), strategy="sha256", validator="tsv", required_header=("Barcode", "Aligned Count")),
+		OutputRequirement("unaligned_read_counts", outputs.path("unaligned_read_counts"), strategy="sha256", validator="tsv", required_header=("Barcode", "Unaligned Count")),
+		OutputRequirement("amplicon_classification", outputs.path("amplicon_classification"), strategy="sha256", validator="tsv", required_header=("is_valid", "amp1_from_seq")),
+	]
+	for amp_name, amp_info in (amplicon_information or {}).items():
+		if str(amp_info.get("aln_count", "0")) == "0":
+			continue
+		for read in ("r1", "r2"):
+			path = build_stage_filename(
+				stage=STAGE_SPLIT, tag="reads_all_cells", amplicon=amp_name,
+				read=read, ext="fq.gz", output_root=amp_file_dir,
+			)
+			requirements.append(OutputRequirement(
+				f"reads:{amp_name}:{read}", path, strategy="gzip_crc32", allow_empty=True,
+				validator="gzip",
+			))
+	if debug_rescued_reads_bam:
+		requirements.append(OutputRequirement(
+			"debug_rescued_reads", debug_rescued_reads_bam, strategy="stat",
+			allow_empty=True, validator="bam",
+		))
+	if debug_rejected_rescue_reads_bam:
+		requirements.append(OutputRequirement(
+			"debug_rejected_rescue_reads", debug_rejected_rescue_reads_bam,
+			strategy="stat", allow_empty=True, validator="bam",
+		))
+	return tuple(requirements)
+
+
+def _prune_obsolete_split_outputs(
+	cache_manager, previous_record, current_requirements, amp_file_dir,
+):
+	"""Remove old per-amplicon FASTQs only when a trusted split record owned them."""
+	if previous_record is None or cache_manager.config.mode.value == "disabled":
+		return []
+	current_paths = {
+		requirement.normalized_path() for requirement in current_requirements
+	}
+	removed = []
+	for output in previous_record.outputs:
+		key = str(output.get("key", ""))
+		if not key.startswith("reads:"):
+			continue
+		try:
+			amplicon_name, read = key[len("reads:"):].rsplit(":", 1)
+		except ValueError:
+			logging.warning("Ignoring malformed split cache output key during cleanup: %s", key)
+			continue
+		if read not in {"r1", "r2"}:
+			logging.warning("Ignoring unexpected split cache read key during cleanup: %s", key)
+			continue
+		expected = build_stage_filename(
+			stage=STAGE_SPLIT, tag="reads_all_cells", amplicon=amplicon_name,
+			read=read, ext="fq.gz", output_root=amp_file_dir,
+		)
+		if os.path.realpath(str(output.get("path", ""))) != os.path.realpath(expected):
+			logging.warning("Ignoring split cache output with unexpected path during cleanup: %s", key)
+			continue
+		if os.path.realpath(expected) in current_paths:
+			continue
+		try:
+			if safe_remove_owned(
+				expected, allowed_root=amp_file_dir,
+				expected_name=os.path.basename(expected),
+			):
+				removed.append(expected)
+		except ValueError as error:
+			logging.warning("Refusing unsafe stale split cleanup for %s: %s", key, error)
+	return removed
+
+
+def _build_split_cache_record(
+	cache_manager, aligned_bam, amplicon_file, alt_alleles_file, bowtie2_index,
+	primer_lookup_len, adapter_DNA, min_total_reads_per_barcode,
+	assign_reads_to_all_possible_amplicons, debug_rescued_reads_bam,
+	debug_require_strict_amplicon_alignment, debug_rejected_rescue_reads_bam,
+	partial_rescue_min_mean_read_quality,
+):
+	parse_record = cache_manager.load("parse_align")
+	dependencies = []
+	if parse_record is not None:
+		dependencies.append(cache_manager.dependency(parse_record, ("aligned_bam",)))
+	index_files = sorted(
+		path for path in glob.glob(bowtie2_index + ".*")
+		if path.endswith((".bt2", ".bt2l"))
+	)
+	return cache_manager.new_record(
+		"split_reads",
+		algorithm_version=1,
+		dependencies=dependencies,
+		inputs={
+			"aligned_bam": large_file_fingerprint(aligned_bam),
+			"amplicons": small_file_fingerprint(amplicon_file),
+			"alternate_alleles": optional_file_fingerprint(alt_alleles_file, strategy="sha256"),
+			"bowtie2_index": [large_file_fingerprint(path) for path in index_files],
+		},
+		parameters={
+			"primer_lookup_len": int(primer_lookup_len),
+			"adapter_DNA": adapter_DNA,
+			"min_total_reads_per_barcode": int(min_total_reads_per_barcode),
+			"assign_reads_to_all_possible_amplicons": bool(assign_reads_to_all_possible_amplicons),
+			"debug_rescued_reads_bam": os.path.realpath(debug_rescued_reads_bam) if debug_rescued_reads_bam else "",
+			"debug_require_strict_amplicon_alignment": bool(debug_require_strict_amplicon_alignment),
+			"debug_rejected_rescue_reads_bam": os.path.realpath(debug_rejected_rescue_reads_bam) if debug_rejected_rescue_reads_bam else "",
+			"partial_rescue_min_mean_read_quality": float(partial_rescue_min_mean_read_quality),
+		},
+		tools={
+			"bowtie2": tool_identity(("bowtie2", "--version")),
+			"samtools": tool_identity(("samtools", "--version")),
+		},
+	)
 
 def _load_split_read_cache(info_file, amp_file_dir):
 	amplicon_names = []
@@ -421,7 +551,7 @@ def _classify_amplicon_assignment(
 	return result
 
 
-def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_file,primer_lookup_len,amp_file_dir,bowtie2_index,adapter_DNA,n_processes,keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons=False, debug_rescued_reads_bam="", debug_require_strict_amplicon_alignment=False, debug_rejected_rescue_reads_bam="", partial_rescue_min_mean_read_quality=PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT):
+def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_file,primer_lookup_len,amp_file_dir,bowtie2_index,adapter_DNA,n_processes,keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons=False, debug_rescued_reads_bam="", debug_require_strict_amplicon_alignment=False, debug_rejected_rescue_reads_bam="", partial_rescue_min_mean_read_quality=PARTIAL_RESCUE_MIN_MEAN_READ_QUALITY_DEFAULT, cache_manager=None):
 	"""
 	Split reads from a name-sorted aligned BAM into per-amplicon FASTQ files.
 
@@ -496,7 +626,32 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 		raise ValueError("debug_require_strict_amplicon_alignment cannot be used with assign_reads_to_all_possible_amplicons")
 
 	info_file = output_root+".splitReads.ampliconInfo.txt"
-	if os.path.isfile(info_file):
+	cache_record = None
+	previous_split_record = None
+	if cache_manager is not None:
+		if cache_manager.config.mode.value != "disabled":
+			previous_split_record = cache_manager.load("split_reads")
+		cache_record = _build_split_cache_record(
+			cache_manager, aligned_bam, amplicon_file, alt_alleles_file,
+			bowtie2_index, primer_lookup_len, adapter_DNA,
+			min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons,
+			debug_rescued_reads_bam, debug_require_strict_amplicon_alignment,
+			debug_rejected_rescue_reads_bam, partial_rescue_min_mean_read_quality,
+		)
+		cached_information = None
+		if os.path.isfile(info_file):
+			try:
+				_cache_valid, cached_names, cached_information = _load_split_read_cache(info_file, amp_file_dir)
+			except (OSError, ValueError, IndexError):
+				cached_information = None
+		cache_requirements = _split_cache_requirements(
+			output_root, amp_file_dir, info_file, cached_information,
+			debug_rescued_reads_bam, debug_rejected_rescue_reads_bam,
+		)
+		if cache_manager.evaluate(cache_record, cache_requirements).is_hit:
+			logging.info("Finished splitting reads from validated cache")
+			return cached_names, cached_information, info_file
+	elif os.path.isfile(info_file):
 		cache_is_valid, amplicon_names, amplicon_information = _load_split_read_cache(info_file, amp_file_dir)
 		if cache_is_valid:
 			logging.info ("Finished splitting reads")
@@ -1050,5 +1205,15 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 		logging.debug('Deleting intermediate amplicon files')
 		safe_remove(amplicon_fasta_file, silent=True)
 		safe_remove(aligned_amps_file, silent=True)
+
+	if cache_manager is not None:
+		final_requirements = _split_cache_requirements(
+				output_root, amp_file_dir, info_file, amplicon_information,
+				debug_rescued_reads_bam, debug_rejected_rescue_reads_bam,
+			)
+		_prune_obsolete_split_outputs(
+			cache_manager, previous_split_record, final_requirements, amp_file_dir,
+		)
+		cache_manager.commit(cache_record, final_requirements)
 
 	return amplicon_names,amplicon_information,info_file

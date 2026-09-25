@@ -81,6 +81,16 @@ def test_parse_settings_enables_output_manifest(tmp_path, monkeypatch):
 	assert _parse_settings(settings, monkeypatch)[-2] is True
 
 
+def test_parse_cache_config_defaults_to_auto_and_validates_values(tmp_path):
+	settings = _write_minimal_settings(tmp_path)
+	assert cli._parse_cache_config(str(settings)).mode.value == "auto"
+	settings.write_text(settings.read_text() + "cache_mode\trefresh\n")
+	assert cli._parse_cache_config(str(settings)).mode.value == "refresh"
+	settings.write_text(settings.read_text() + "cache_mode\tsometimes\n")
+	with pytest.raises(ValueError, match="Invalid value for cache_mode"):
+		cli._parse_cache_config(str(settings))
+
+
 def test_parse_settings_rejects_non_tab_lines(tmp_path, monkeypatch):
 	settings = tmp_path / "settings.txt"
 	settings.write_text("r1 data/r1.fastq\n")

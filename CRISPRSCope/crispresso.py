@@ -38,6 +38,14 @@ from scipy.stats import multinomial
 from upsetplot import UpSet
 
 from CRISPRSCope import __version__
+from CRISPRSCope.cache import (
+	OutputRequirement,
+	canonical_digest,
+	gzip_content_fingerprint,
+	large_file_fingerprint,
+	safe_remove_owned,
+	tool_identity,
+)
 from CRISPRSCope.io_utils import open_text_maybe_gzip
 from CRISPRSCope.output_artifacts import OutputContext, OutputManifest
 
@@ -309,8 +317,292 @@ def _barcode_set_sha256(barcodes):
 	return digest.hexdigest()
 
 
+def _existing_or_missing_large_fingerprint(path, *, gzip_content=False):
+	if os.path.isfile(path):
+		if gzip_content:
+			return gzip_content_fingerprint(path)
+		return large_file_fingerprint(path)
+	return {
+		"path": os.path.realpath(path),
+		"strategy": "gzip_crc32" if gzip_content else "stat",
+		"missing": True,
+	}
+
+
+def _filter_selected_paths(output_root, amplicon_name):
+	amplicon_dir = output_root + ".seq_by_amplicon"
+	return {
+		"input_r1": build_stage_filename(
+			STAGE_SPLIT, "reads_all_cells", amplicon=amplicon_name,
+			read="r1", ext="fq.gz", output_root=amplicon_dir,
+		),
+		"input_r2": build_stage_filename(
+			STAGE_SPLIT, "reads_all_cells", amplicon=amplicon_name,
+			read="r2", ext="fq.gz", output_root=amplicon_dir,
+		),
+		"input_alleles": build_stage_filename(
+			STAGE_SPLIT, "alleles_all_cells", amplicon=amplicon_name,
+			ext="fq", output_root=amplicon_dir,
+		),
+		"output_r1": build_stage_filename(
+			STAGE_FILTER, "reads_qc_cells", amplicon=amplicon_name,
+			read="r1", ext="fq.gz", output_root=amplicon_dir,
+		),
+		"output_r2": build_stage_filename(
+			STAGE_FILTER, "reads_qc_cells", amplicon=amplicon_name,
+			read="r2", ext="fq.gz", output_root=amplicon_dir,
+		),
+		"output_alleles": build_stage_filename(
+			STAGE_FILTER, "alleles_qc_cells", amplicon=amplicon_name,
+			ext="fq.gz", output_root=amplicon_dir,
+		),
+	}
+
+
+def _build_filter_selected_cache_record(cache_manager, output_root, amplicon_name, barcode_hash):
+	paths = _filter_selected_paths(output_root, amplicon_name)
+	dependencies = []
+	for stage, scope in (("parse_crispresso", amplicon_name),):
+		record = cache_manager.load(stage, scope)
+		if record is not None:
+			dependencies.append(cache_manager.dependency(record))
+	return cache_manager.new_record(
+		"filter_selected",
+		amplicon_name,
+		algorithm_version=1,
+		dependencies=dependencies,
+		inputs={
+			"r1": _existing_or_missing_large_fingerprint(
+				paths["input_r1"], gzip_content=True,
+			),
+			"r2": _existing_or_missing_large_fingerprint(
+				paths["input_r2"], gzip_content=True,
+			),
+			"alleles": _existing_or_missing_large_fingerprint(paths["input_alleles"]),
+		},
+		parameters={"selected_barcodes_sha256": barcode_hash},
+	)
+
+
+def _filter_selected_cache_requirements(output_root, amplicon_name):
+	paths = _filter_selected_paths(output_root, amplicon_name)
+	return (
+		OutputRequirement("filtered_r1", paths["output_r1"], strategy="stat", allow_empty=True, validator="gzip"),
+		OutputRequirement("filtered_r2", paths["output_r2"], strategy="stat", allow_empty=True, validator="gzip"),
+		OutputRequirement("filtered_alleles", paths["output_alleles"], strategy="stat", allow_empty=True, validator="gzip"),
+	)
+
+
+def prune_removed_amplicon_caches(
+	cache_manager, current_amplicons, output_root, crispresso_dir,
+):
+	"""Remove trusted cache records and stage-owned outputs for removed scopes."""
+	if cache_manager is None or cache_manager.config.mode.value == "disabled":
+		return []
+	active = set(current_amplicons)
+	amplicon_dir = output_root + ".seq_by_amplicon"
+	stage_roots = {
+		"crispresso_reads": crispresso_dir,
+		"parse_crispresso": crispresso_dir,
+		"filter_selected": amplicon_dir,
+		"crispresso_filtered": crispresso_dir + ".filtered",
+	}
+	removed = []
+	for stage, allowed_root in stage_roots.items():
+		for record in cache_manager.trusted_stage_records(stage):
+			amplicon_name = record.scope
+			if amplicon_name in active:
+				continue
+			if (
+				not amplicon_name
+				or amplicon_name in {".", ".."}
+				or os.path.basename(amplicon_name) != amplicon_name
+			):
+				logging.warning(
+					"Ignoring unsafe obsolete cache scope %r for stage %s",
+					amplicon_name, stage,
+				)
+				continue
+
+			if stage in {"crispresso_reads", "crispresso_filtered"}:
+				root = allowed_root
+				folder = os.path.join(root, "CRISPResso_on_" + amplicon_name)
+				require_report = not bool(
+					record.parameters.get("suppress_sub_crispresso_plots", False)
+				)
+				targets = [
+					(folder, root, "CRISPResso_on_" + amplicon_name),
+					(os.path.join(root, amplicon_name + ".finished"), root, amplicon_name + ".finished"),
+					(os.path.join(root, amplicon_name + ".log"), root, amplicon_name + ".log"),
+				]
+				if require_report:
+					targets.append((
+						folder + ".html", root,
+						"CRISPResso_on_" + amplicon_name + ".html",
+					))
+				expected_record_paths = {
+					os.path.realpath(os.path.join(folder, "CRISPResso2_info.json")),
+					os.path.realpath(os.path.join(folder, "CRISPResso_output.fastq.gz")),
+					os.path.realpath(os.path.join(root, amplicon_name + ".finished")),
+				}
+				if require_report:
+					expected_record_paths.add(os.path.realpath(folder + ".html"))
+			elif stage == "parse_crispresso":
+				folder = os.path.join(crispresso_dir, "CRISPResso_on_" + amplicon_name)
+				requirements = _parse_crispresso_cache_requirements(
+					output_root, amplicon_name, folder,
+				)
+				targets = []
+				for requirement in requirements:
+					target_root = (
+						amplicon_dir if requirement.key == "allele_fastq" else crispresso_dir
+					)
+					targets.append((
+						requirement.normalized_path(), target_root,
+						os.path.basename(requirement.path),
+					))
+				expected_record_paths = {
+					requirement.normalized_path() for requirement in requirements
+				}
+			else:
+				requirements = _filter_selected_cache_requirements(
+					output_root, amplicon_name,
+				)
+				targets = [
+					(requirement.normalized_path(), amplicon_dir, os.path.basename(requirement.path))
+					for requirement in requirements
+				]
+				expected_record_paths = {
+					requirement.normalized_path() for requirement in requirements
+				}
+
+			recorded_paths = {
+				os.path.realpath(str(item.get("path", "")))
+				for item in record.outputs
+			}
+			if not recorded_paths.issubset(expected_record_paths):
+				logging.warning(
+					"Ignoring cache record with unexpected output paths during stale cleanup: %s/%s",
+					stage, amplicon_name,
+				)
+				continue
+			try:
+				for target, target_root, expected_name in targets:
+					safe_remove_owned(
+						target, allowed_root=target_root,
+						expected_name=expected_name,
+					)
+				cache_manager.remove_record(record)
+			except ValueError as error:
+				logging.warning(
+					"Refusing unsafe stale cleanup for %s/%s: %s",
+					stage, amplicon_name, error,
+				)
+				continue
+			removed.append((stage, amplicon_name))
+			logging.info(
+				"Removed obsolete cache scope stage=%s scope=%s",
+				stage, amplicon_name,
+			)
+	return removed
+
+
+def _filter_amplicon_reads_with_cache(
+	output_root, parsed_information, amplicon_names, cell_quality_to_analyze,
+	n_processes, cache_manager,
+):
+	amplicon_dir = output_root + ".seq_by_amplicon/"
+	barcodes = set(
+		parsed_information.loc[
+			parsed_information['Color'].isin(cell_quality_to_analyze)
+		].index.tolist()
+	)
+	barcode_hash = _barcode_set_sha256(barcodes)
+	barcode_cache_file = output_root + ".filtered_barcodes.sha256"
+	records = {}
+	requirements = {}
+	read_results = []
+	misses = []
+
+	for amp in amplicon_names:
+		record = _build_filter_selected_cache_record(
+			cache_manager, output_root, amp, barcode_hash
+		)
+		requirement = _filter_selected_cache_requirements(output_root, amp)
+		records[amp] = record
+		requirements[amp] = requirement
+		if cache_manager.evaluate(record, requirement).is_hit:
+			paths = _filter_selected_paths(output_root, amp)
+			read_results.append({
+				"Amplicon": amp, "Status": "Success", "R1": paths["output_r1"],
+				"R2": paths["output_r2"], "Reason": "ValidatedCache",
+			})
+		else:
+			misses.append(amp)
+
+	if misses:
+		with mp.Pool(n_processes) as pool:
+			read_results.extend(pool.map(
+				_filter_to_hq_reads_at_single_amplicon,
+				[(amp, amplicon_dir, barcodes, True) for amp in misses],
+			))
+
+	read_by_amp = {result.get("Amplicon"): result for result in read_results}
+	read_success = [read_by_amp[amp] for amp in amplicon_names if read_by_amp.get(amp, {}).get("Status") == "Success"]
+	read_failures = [read_by_amp[amp] for amp in amplicon_names if read_by_amp.get(amp, {}).get("Status") != "Success"]
+	if not read_success:
+		safe_remove(barcode_cache_file, silent=True)
+		raise RuntimeError(
+			"No amplicons completed read filtering to high quality barcodes successfully."
+		)
+
+	allele_results = []
+	miss_read_success = [result for result in read_success if result["Amplicon"] in misses]
+	if miss_read_success:
+		with mp.Pool(n_processes) as pool:
+			allele_results.extend(pool.map(
+				_filter_to_hq_alleles_at_single_amplicon,
+				[(result, amplicon_dir, barcodes, True) for result in miss_read_success],
+			))
+	for result in read_success:
+		amp = result["Amplicon"]
+		if amp not in misses:
+			allele_results.append({
+				"Amplicon": amp, "Status": "Success",
+				"Out": _filter_selected_paths(output_root, amp)["output_alleles"],
+				"Reason": "ValidatedCache",
+			})
+
+	allele_by_amp = {result.get("Amplicon"): result for result in allele_results}
+	for amp in misses:
+		if (
+			read_by_amp.get(amp, {}).get("Status") == "Success"
+			and allele_by_amp.get(amp, {}).get("Status") == "Success"
+		):
+			cache_manager.commit(records[amp], requirements[amp])
+
+	allele_failures = [
+		allele_by_amp[amp] for amp in amplicon_names
+		if amp in allele_by_amp and allele_by_amp[amp].get("Status") != "Success"
+	]
+	if read_failures or allele_failures:
+		safe_remove(barcode_cache_file, silent=True)
+	else:
+		with open(barcode_cache_file, "w") as handle:
+			handle.write(barcode_hash + "\n")
+	return {
+		"read_filter_successes": read_success,
+		"read_filter_failures": read_failures,
+		"allele_filter_successes": [
+			allele_by_amp[amp] for amp in amplicon_names
+			if allele_by_amp.get(amp, {}).get("Status") == "Success"
+		],
+		"allele_filter_failures": allele_failures,
+	}
+
+
 def filter_amplicon_reads(output_root, parsed_information, amplicon_names,
-						  cell_quality_to_analyze, n_processes):
+							  cell_quality_to_analyze, n_processes, cache_manager=None):
 	"""
 	Filter per-amplicon FASTQs and allele files to only include reads from
 	barcodes classified as high-quality, running the work in parallel.
@@ -350,6 +642,12 @@ def filter_amplicon_reads(output_root, parsed_information, amplicon_names,
 	- This function does not change the parsed_metrics/reads_per_cell mapping; it
 	  only writes filtered per-amplicon FASTQs for downstream CRISPResso steps.
 	"""
+	if cache_manager is not None:
+		return _filter_amplicon_reads_with_cache(
+			output_root, parsed_information, amplicon_names,
+			cell_quality_to_analyze, n_processes, cache_manager,
+		)
+
 	amplicon_dir = output_root + ".seq_by_amplicon/"
 	barcodes = parsed_information.loc[parsed_information['Color'].isin(cell_quality_to_analyze)].index.tolist()
 	barcodes = set(barcodes)
@@ -445,7 +743,95 @@ def _filtered_allele_fastq_path(output_root, amplicon_name):
 	)
 
 
-def run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles):
+def _crispresso_cache_requirements(
+	finished_file, crispresso_run_folder, require_report=False,
+):
+	requirements = [
+		OutputRequirement(
+			"finished", finished_file, strategy="sha256", allow_empty=True,
+		),
+		OutputRequirement(
+			"crispresso_info",
+			os.path.join(crispresso_run_folder, "CRISPResso2_info.json"),
+			strategy="sha256", validator="json",
+		),
+		OutputRequirement(
+			"crispresso_fastq",
+			os.path.join(crispresso_run_folder, "CRISPResso_output.fastq.gz"),
+			strategy="stat", validator="fastq",
+		),
+	]
+	if require_report:
+		requirements.append(OutputRequirement(
+			"report", crispresso_run_folder + ".html", strategy="stat",
+		))
+	return tuple(requirements)
+
+
+def _build_crispresso_cache_record(
+	cache_manager, amplicon_name, amplicon_info, suppress_sub_crispresso_plots,
+	alleles, input_paths,
+):
+	stage = "crispresso_filtered" if alleles else "crispresso_reads"
+	upstream_stage = "filter_selected" if alleles else "split_reads"
+	upstream_scope = amplicon_name if alleles else "run"
+	upstream = cache_manager.load(upstream_stage, upstream_scope)
+	dependencies = []
+	if upstream is not None:
+		if alleles:
+			dependencies.append(cache_manager.dependency(upstream))
+		else:
+			output_keys = (
+				f"reads:{amplicon_name}:r1",
+				f"reads:{amplicon_name}:r2",
+			)
+			# The split record is run-wide, but CRISPResso consumes only one
+			# amplicon's reads.  Project its dependency key onto global split
+			# behavior plus this amplicon's definition.  The selected gzip
+			# output signatures below catch assignment changes caused by other
+			# amplicons without copying the complete split inventory N times.
+			projected_key = canonical_digest({
+				"schema_version": upstream.schema_version,
+				"stage": upstream.stage,
+				"algorithm_version": upstream.algorithm_version,
+				"dependencies": upstream.dependencies,
+				"inputs": {
+					key: upstream.inputs.get(key)
+					for key in ("aligned_bam", "bowtie2_index")
+				},
+				"parameters": upstream.parameters,
+				"tools": upstream.tools,
+				"amplicon": {
+					key: amplicon_info.get(key)
+					for key in (
+						"name", "input_amp_seqs", "input_alternate_allele_seqs",
+						"amp_seqs", "aln_chr", "aln_start", "aln_end",
+						"secondary_aln_chr", "secondary_aln_start", "secondary_aln_end",
+					)
+				},
+			})
+			dependencies.append(cache_manager.dependency(
+				upstream, output_keys, cache_key=projected_key,
+			))
+	return cache_manager.new_record(
+		stage,
+		amplicon_name,
+		algorithm_version=1,
+		dependencies=dependencies,
+		inputs={
+			"fastqs": [gzip_content_fingerprint(path) for path in input_paths],
+			"amplicon_sequences": amplicon_info["amp_seqs"],
+			"guide_sequence": _normalize_optional_guide(amplicon_info.get("guide_seq", "")),
+		},
+		parameters={
+			"mode": "filtered_alleles" if alleles else "reads",
+			"suppress_sub_crispresso_plots": bool(suppress_sub_crispresso_plots),
+		},
+		tools={"CRISPResso": tool_identity(("CRISPResso", "--version"))},
+	)
+
+
+def run_crispresso_commands(amplicon_names,amplicon_information,output_root,crispresso_dir,suppress_sub_crispresso_plots,n_processes, alleles, cache_manager=None):
 	"""
 	Generate and execute CRISPResso2 commands for each amplicon.
 
@@ -508,13 +894,13 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 
 	cached_information = {}
 	current_allele_input_hashes = {}
-	if alleles:
+	if alleles and cache_manager is None:
 		for amplicon_name in amplicon_names:
 			allele_input = _filtered_allele_fastq_path(output_root, amplicon_name)
 			if allele_input and os.path.isfile(allele_input):
 				current_allele_input_hashes[amplicon_name] = _decompressed_fastq_sha256(allele_input)
 
-	if os.path.isfile(info_file):
+	if os.path.isfile(info_file) and cache_manager is None:
 		with open(info_file,'r') as fin:
 			head = fin.readline().strip()
 			head_els = head.split("\t")
@@ -561,6 +947,8 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 
 	crispresso_commands = []
 	crispresso_information = {}
+	cache_records = {}
+	cache_requirements = {}
 
 	not_run_count = 0
 	finished_count = 0
@@ -583,6 +971,19 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 			crispresso_information[amplicon_name]['log_file'] = 'NA'
 			crispresso_information[amplicon_name]['crispresso_run_folder'] = 'NA'
 			not_run_count += 1
+			if cache_manager is not None:
+				stage = "crispresso_filtered" if alleles else "crispresso_reads"
+				skip_record = cache_manager.new_record(
+					stage, amplicon_name, algorithm_version=1,
+					inputs={"aln_count": "0"},
+					parameters={"mode": "filtered_alleles" if alleles else "reads"},
+				)
+				decision = cache_manager.evaluate(skip_record, ())
+				if not decision.is_hit:
+					cache_manager.commit(
+						skip_record, (),
+						result={"status": "skipped", "reason": "zero_aligned_reads"},
+					)
 		else:
 
 			#print(f"Running on {amplicon_name}\n{amplicon_information[amplicon_name]}\n")
@@ -659,8 +1060,7 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 				"-n", amplicon_name,
 				"-w", "2",
 				"--fastq_output",
-				"--no_rerun",
-				"--exclude_bp_from_left", "0",
+					"--exclude_bp_from_left", "0",
 				"--exclude_bp_from_right", "0",
 			])
 			if not alleles:
@@ -673,7 +1073,33 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 			crispresso_information[amplicon_name]['crispresso_run_folder'] = crispresso_run_folder
 
 			crispresso_info_file = os.path.join(crispresso_run_folder, 'CRISPResso2_info.json')
-			if alleles and (os.path.isfile(finished_file) or os.path.isdir(crispresso_run_folder)):
+			if cache_manager is not None:
+				input_paths = [amp_filename] if alleles else [amp_filename_r1, amp_filename_r2]
+				cache_record = _build_crispresso_cache_record(
+					cache_manager, amplicon_name, amplicon_information[amplicon_name],
+					suppress_sub_crispresso_plots, alleles, input_paths,
+				)
+				requirements = _crispresso_cache_requirements(
+					finished_file, crispresso_run_folder,
+					require_report=not suppress_sub_crispresso_plots,
+				)
+				decision = cache_manager.evaluate(cache_record, requirements)
+				if decision.is_hit:
+					finished_count += 1
+					crispresso_information[amplicon_name]['status'] = 'Completed'
+					crispresso_information[amplicon_name]['crispresso_result'] = 'Completed'
+					continue
+				cache_records[amplicon_name] = cache_record
+				cache_requirements[amplicon_name] = requirements
+				safe_remove_owned(
+					finished_file, allowed_root=crispresso_dir,
+					expected_name=amplicon_name + ".finished",
+				)
+				safe_remove_owned(
+					crispresso_run_folder, allowed_root=crispresso_dir,
+					expected_name="CRISPResso_on_" + amplicon_name,
+				)
+			elif alleles and (os.path.isfile(finished_file) or os.path.isdir(crispresso_run_folder)):
 				cached_hash = cached_information.get(amplicon_name, {}).get('input_sha256')
 				current_hash = current_allele_input_hashes.get(amplicon_name)
 				if not current_hash or cached_hash != current_hash:
@@ -684,13 +1110,14 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					safe_remove(finished_file, silent=True)
 					if os.path.isdir(crispresso_run_folder):
 						shutil.rmtree(crispresso_run_folder)
-			if os.path.isfile(finished_file) and os.path.isfile(crispresso_info_file):
+			if cache_manager is None and os.path.isfile(finished_file) and os.path.isfile(crispresso_info_file):
 				finished_count += 1
 				continue
 			else:
 				if os.path.isfile(finished_file) and not os.path.isfile(crispresso_info_file):
 					os.remove(finished_file)
 				crispresso_commands.append({
+					'amplicon_name': amplicon_name,
 					'args': crispresso_args,
 					'command': crispresso_cmd,
 					'log_file': log_file,
@@ -704,6 +1131,8 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 
 	logging.info('Got ' + str(len(crispresso_commands)) + ' CRISPResso commands')
 
+	command_errors = []
+	cache_commit_errors = {}
 	if len(crispresso_commands) > 0:
 		# start processes
 		logging.info("Running on "+ str(n_processes) + " processes..")
@@ -711,17 +1140,26 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 		result = pool.map_async(run_crispresso_command, crispresso_commands).get(threading.TIMEOUT_MAX)
 		pool.close()
 		pool.join()
-		for completed_job in result:
+		for job, completed_job in zip(crispresso_commands, result):
 			if completed_job.get('error'):
-				_raise_command_error(
-					completed_job.get('command'),
-					completed_job.get('returncode'),
-					context=completed_job.get('error'),
-				)
+				command_errors.append(completed_job)
+			elif cache_manager is not None:
+				amplicon_name = job['amplicon_name']
+				try:
+					cache_manager.commit(
+						cache_records[amplicon_name], cache_requirements[amplicon_name]
+					)
+				except Exception as error:
+					cache_commit_errors[amplicon_name] = str(error)
 
 	for amplicon_name in amplicon_names:
 		if 'status' in crispresso_information[amplicon_name] and crispresso_information[amplicon_name]['status'] == 'Skipped':
 			pass
+		elif amplicon_name in cache_commit_errors:
+			crispresso_information[amplicon_name]['status'] = 'Failed'
+			crispresso_information[amplicon_name]['crispresso_result'] = (
+				"Cache validation failed: " + cache_commit_errors[amplicon_name]
+			)
 		else:
 			finished_file = crispresso_information[amplicon_name]['finished_file']
 			crispresso_info_file = os.path.join(crispresso_information[amplicon_name]['crispresso_run_folder'], 'CRISPResso2_info.json')
@@ -757,6 +1195,18 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 		fout.write("\t".join(header_els)+"\n")
 		for amplicon_name in amplicon_names:
 			fout.write("\t".join([crispresso_information[amplicon_name][x] for x in header_els])+"\n")
+	if command_errors:
+		completed_job = command_errors[0]
+		_raise_command_error(
+			completed_job.get('command'), completed_job.get('returncode'),
+			context=completed_job.get('error'),
+		)
+	if cache_commit_errors:
+		details = "; ".join(
+			f"{amplicon_name}: {error}"
+			for amplicon_name, error in cache_commit_errors.items()
+		)
+		raise RuntimeError("Unable to commit CRISPResso cache record(s): " + details)
 	return crispresso_information
 
 
@@ -1401,12 +1851,80 @@ def _parse_cache_matches_ignore_substitutions(folder_finished_file, ignore_subst
 	return observed_value == expected_value
 
 
+def _parse_crispresso_cache_requirements(output_root, amplicon_name, crispresso_run_folder):
+	amplicon_dir = output_root + ".seq_by_amplicon"
+	allele_fastq = build_stage_filename(
+		stage=STAGE_SPLIT, tag="alleles_all_cells", amplicon=amplicon_name,
+		ext="fq", output_root=amplicon_dir,
+	)
+	return (
+		OutputRequirement(
+			"summary", crispresso_run_folder + ".summ", strategy="sha256",
+			validator="tsv", required_header=("cell", "all_cell_read_count"),
+		),
+		OutputRequirement(
+			"indel_summary", crispresso_run_folder + ".summarize_indels.out",
+			strategy="sha256", validator="tsv", required_header=("cell", "read_count"),
+		),
+		OutputRequirement(
+			"allele_summary", crispresso_run_folder + ".summarize_alleles.out",
+			strategy="sha256", validator="tsv", required_header=("cell", "read_count"),
+		),
+		OutputRequirement(
+			"allele_fastq", allele_fastq, strategy="stat", allow_empty=True,
+		),
+		OutputRequirement(
+			"finished", crispresso_run_folder + ".summ.finished", strategy="sha256",
+		),
+	)
+
+
+def _build_parse_crispresso_cache_record(
+	cache_manager, amplicon_name, amplicon_info, crispresso_run_folder,
+	ignore_substitutions, min_num_reads_per_cell,
+):
+	upstream = cache_manager.load("crispresso_reads", amplicon_name)
+	dependencies = [cache_manager.dependency(upstream)] if upstream is not None else []
+	crispresso_fastq = os.path.join(crispresso_run_folder, "CRISPResso_output.fastq.gz")
+	return cache_manager.new_record(
+		"parse_crispresso",
+		amplicon_name,
+		algorithm_version=1,
+		dependencies=dependencies,
+		inputs={
+			"crispresso_fastq": large_file_fingerprint(crispresso_fastq),
+			"amplicon_sequences": amplicon_info["amp_seqs"],
+			"input_ref_allele_counts": amplicon_info["input_ref_allele_counts"],
+		},
+		parameters={
+			"ignore_substitutions": bool(ignore_substitutions),
+			"min_num_reads_per_cell": int(min_num_reads_per_cell),
+		},
+	)
+
+
+def _parse_crispresso_output_with_status(this_args):
+	"""Run one parser without allowing one amplicon to hide peer successes."""
+	amplicon_name = this_args["amplicon_name"]
+	try:
+		parse_one_crispresso_output(this_args)
+	except Exception as error:
+		return {
+			"amplicon_name": amplicon_name,
+			"error_type": type(error).__name__,
+			"error": str(error),
+			"traceback": traceback.format_exc(),
+		}
+	return {"amplicon_name": amplicon_name, "error": None}
+
+
 def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_file,crispresso_information,
-							output_root, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, n_processes,num_max_alleles=2,num_references=1,
-							min_num_reads_per_cell=5,min_allele_pct_cutoff=.1,min_allele_count_cutoff=2,
-							ignore_substitutions=False,
-							write_alleles=False,
-							amplicon_score_config=None):
+								output_root, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, n_processes,num_max_alleles=2,num_references=1,
+								min_num_reads_per_cell=5,min_allele_pct_cutoff=.1,min_allele_count_cutoff=2,
+								ignore_substitutions=False,
+								write_alleles=False,
+								amplicon_score_config=None,
+								cache_manager=None):
 	"""
 	Generate and execute CRISPResso2 commands for each amplicon.
 
@@ -1457,6 +1975,8 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 	- Skips amplicons with zero aligned reads.
 	"""
 	parse_output_args = []
+	parse_cache_records = {}
+	parse_cache_requirements = {}
 	for name in amplicon_names:
 		if crispresso_information[name]['status'] == 'Completed':
 			crispresso_run_folder = crispresso_information[name]['crispresso_run_folder']
@@ -1464,7 +1984,24 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 			input_ref_allele_counts = amplicon_information[name]['input_ref_allele_counts']
 			folder_finished_file = crispresso_run_folder + ".summ.finished"
 
-			if not _parse_cache_matches_ignore_substitutions(folder_finished_file, ignore_substitutions):
+			cache_hit = False
+			if cache_manager is not None:
+				cache_record = _build_parse_crispresso_cache_record(
+					cache_manager, name, amplicon_information[name],
+					crispresso_run_folder, ignore_substitutions,
+					min_num_reads_per_cell,
+				)
+				requirements = _parse_crispresso_cache_requirements(
+					output_root, name, crispresso_run_folder
+				)
+				cache_hit = cache_manager.evaluate(cache_record, requirements).is_hit
+				if not cache_hit:
+					parse_cache_records[name] = cache_record
+					parse_cache_requirements[name] = requirements
+			elif _parse_cache_matches_ignore_substitutions(folder_finished_file, ignore_substitutions):
+				cache_hit = True
+
+			if not cache_hit:
 				if os.path.isfile(folder_finished_file):
 					logging.info(
 						"Reparsing %s because ignore_substitutions changed to %s",
@@ -1487,15 +2024,51 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 
 	if len(parse_output_args) > 0:
 		logging.info('Parsing ' + str(len(parse_output_args)) + ' CRISPResso folders on ' + str(n_processes) + ' threads..')
-		# start processes
 		if n_processes > 1 and len(parse_output_args) > 1:
 			pool = mp.Pool(n_processes)
-			pool.map_async(parse_one_crispresso_output, parse_output_args).get(threading.TIMEOUT_MAX)
-			pool.close()
-			pool.join()
+			try:
+				parse_results = pool.map_async(
+					_parse_crispresso_output_with_status, parse_output_args,
+				).get(threading.TIMEOUT_MAX)
+			finally:
+				pool.close()
+				pool.join()
 		else:
-			for this_args in parse_output_args:
-				parse_one_crispresso_output(this_args)
+			parse_results = [
+				_parse_crispresso_output_with_status(this_args)
+				for this_args in parse_output_args
+			]
+
+		parse_errors = []
+		for result in parse_results:
+			name = result["amplicon_name"]
+			if result.get("error"):
+				logging.error(
+					"CRISPResso parser failed for %s (%s): %s\n%s",
+					name, result.get("error_type", "Exception"), result["error"],
+					result.get("traceback", ""),
+				)
+				parse_errors.append(result)
+				continue
+			if cache_manager is not None:
+				try:
+					cache_manager.commit(
+						parse_cache_records[name], parse_cache_requirements[name]
+					)
+				except Exception as error:
+					logging.error(
+						"Could not commit parsed-summary cache for %s: %s", name, error,
+					)
+					parse_errors.append({
+						"amplicon_name": name,
+						"error_type": type(error).__name__,
+						"error": str(error),
+					})
+		if parse_errors:
+			details = "; ".join(
+				f"{item['amplicon_name']}: {item['error']}" for item in parse_errors
+			)
+			raise RuntimeError("Failed to parse CRISPResso output(s): " + details)
 	else:
 		logging.info('Finished parsing CRISPResso folders')
 

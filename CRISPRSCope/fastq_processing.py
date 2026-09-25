@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import errno
+import glob
 import gzip
 import hashlib
 import json
@@ -15,6 +16,7 @@ import shutil
 import signal
 import subprocess as sb
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -38,6 +40,12 @@ from scipy.stats import multinomial
 from upsetplot import UpSet
 
 from CRISPRSCope import __version__
+from CRISPRSCope.cache import (
+	OutputRequirement,
+	large_file_fingerprint,
+	small_file_fingerprint,
+	tool_identity,
+)
 from CRISPRSCope.io_utils import open_text_maybe_gzip
 from CRISPRSCope.output_artifacts import OutputContext, OutputManifest
 
@@ -454,7 +462,8 @@ def run_alignment(args):
 
 def parse_and_align_reads(r1_fastqs,r2_fastqs,constant1,constant2,
 						  output_root,barcode_file,allow_barcode_mismatches,
-						  adapter_DNA,bowtie2_index,n_processes,keep_intermediate_files=False):
+						  adapter_DNA,bowtie2_index,n_processes,keep_intermediate_files=False,
+						  cache_manager=None):
 	"""
 	Parse input FASTQs (possibly in parallel), align parsed reads, and produce a name-sorted BAM
 	and a cell-count mapping.
@@ -521,8 +530,47 @@ def parse_and_align_reads(r1_fastqs,r2_fastqs,constant1,constant2,
 		 output_root = output_root
 	)
 
-
-	if os.path.isfile(info_file) and os.path.isfile(aligned_bam) and os.path.isfile(cell_file):
+	cache_record = None
+	cache_requirements = (
+		OutputRequirement("aligned_bam", aligned_bam, strategy="stat", validator="bam"),
+		OutputRequirement(
+			"cell_counts", cell_file, strategy="sha256", allow_empty=True,
+			validator="cell_counts",
+		),
+	)
+	if cache_manager is not None:
+		index_files = sorted(
+			path for path in glob.glob(bowtie2_index + ".*")
+			if path.endswith((".bt2", ".bt2l"))
+		)
+		cache_record = cache_manager.new_record(
+			"parse_align",
+			algorithm_version=1,
+			inputs={
+				"r1": [large_file_fingerprint(path) for path in r1_fastqs.split(",")],
+				"r2": [large_file_fingerprint(path) for path in r2_fastqs.split(",")],
+				"barcodes": small_file_fingerprint(barcode_file),
+				"bowtie2_index": [large_file_fingerprint(path) for path in index_files],
+			},
+			parameters={
+				"constant1": constant1,
+				"constant2": constant2,
+				"allow_barcode_mismatches": bool(allow_barcode_mismatches),
+				"adapter_DNA": adapter_DNA,
+			},
+			tools={
+				"bowtie2": tool_identity(("bowtie2", "--version")),
+				"samtools": tool_identity(("samtools", "--version")),
+			},
+		)
+		if cache_manager.evaluate(cache_record, cache_requirements).is_hit:
+			reads_per_cell = {}
+			with open(cell_file, 'r') as fin:
+				for line in fin:
+					reads_per_cell[line.split('\t')[0]] = int(line.split('\t')[1].strip())
+			logging.info("Finished parsing reads from validated cache")
+			return (aligned_bam, reads_per_cell)
+	elif os.path.isfile(info_file) and os.path.isfile(aligned_bam) and os.path.isfile(cell_file):
 		reads_per_cell = {}
 		with open(cell_file, 'r') as fin:
 			for line in fin:
@@ -599,10 +647,16 @@ def parse_and_align_reads(r1_fastqs,r2_fastqs,constant1,constant2,
 		logging.info("Inside parsed_results == 1")
 
 	bam_threads = min(12, n_processes)
-	sort_bam_cmd = ["samtools", "sort", "-n", "-@", str(bam_threads), "-o", aligned_bam, inter_bam]
+	temporary_aligned_bam = aligned_bam + ".tmp.%d" % os.getpid()
+	sort_bam_cmd = ["samtools", "sort", "-n", "-@", str(bam_threads), "-o", temporary_aligned_bam, inter_bam]
 
 	start_bam_sort = time.time()
-	run_command(sort_bam_cmd)
+	try:
+		run_command(sort_bam_cmd)
+		os.replace(temporary_aligned_bam, aligned_bam)
+	except BaseException:
+		safe_remove(temporary_aligned_bam, silent=True)
+		raise
 	end_bam_sort = time.time() - start_bam_sort
 	logging.info("BAM sort finished in %.3f seconds", end_bam_sort)
 
@@ -628,8 +682,20 @@ def parse_and_align_reads(r1_fastqs,r2_fastqs,constant1,constant2,
 
 
 	# Write out cell count file
-	with open(cell_file, 'w') as fout:
-		for cell in merged_metrics.reads_per_cell:
-			fout.write(f"{cell}\t{merged_metrics.reads_per_cell[cell]}\n")
+	cell_parent = os.path.dirname(cell_file) or os.getcwd()
+	fd, temporary_cell_file = tempfile.mkstemp(
+		prefix="." + os.path.basename(cell_file) + ".", suffix=".tmp", dir=cell_parent
+	)
+	try:
+		with os.fdopen(fd, 'w') as fout:
+			for cell in merged_metrics.reads_per_cell:
+				fout.write(f"{cell}\t{merged_metrics.reads_per_cell[cell]}\n")
+		os.replace(temporary_cell_file, cell_file)
+	except BaseException:
+		safe_remove(temporary_cell_file, silent=True)
+		raise
+
+	if cache_manager is not None:
+		cache_manager.commit(cache_record, cache_requirements)
 
 	return (aligned_bam, merged_metrics.reads_per_cell)
