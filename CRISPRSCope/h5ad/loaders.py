@@ -90,14 +90,32 @@ def load_amplicons(amplicons_path: Path) -> pd.DataFrame:
         logger.error("Amplicons file not found at: %s", amplicons_path)
         raise FileNotFoundError(f"Amplicons file not found: {amplicons_path}")
 
-    df = pd.read_csv(
-        amplicons_path,
-        sep="\t",
-        header=None,
-        index_col=0,
-        names=["sequence", "guide"],
-    )
-    df.index.name = "amplicon_name"
+    # The pipeline accepts two required columns (name and sequence) plus guide
+    # and reference-allele-count columns.  Supplying fewer names than fields to
+    # ``read_csv`` causes pandas either to shift the sequence into ``guide`` or
+    # to reject the documented four-column format altogether.
+    df = pd.read_csv(amplicons_path, sep="\t", header=None, dtype=str)
+    if df.shape[1] < 2:
+        raise ValueError(
+            "Amplicon file must contain at least name and sequence columns: "
+            f"{amplicons_path}"
+        )
+    column_names = [
+        "amplicon_name",
+        "sequence",
+        "guide",
+        "reference_allele_count",
+    ]
+    if df.shape[1] > len(column_names):
+        column_names.extend(
+            f"extra_column_{index}"
+            for index in range(len(column_names) + 1, df.shape[1] + 1)
+        )
+    df.columns = column_names[: df.shape[1]]
+    for optional_column in ("guide", "reference_allele_count"):
+        if optional_column not in df.columns:
+            df[optional_column] = pd.NA
+    df = df.set_index("amplicon_name")
     logger.info("Loaded %d amplicons from %s.", len(df), amplicons_path)
     return df
 

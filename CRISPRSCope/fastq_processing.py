@@ -5,6 +5,7 @@ import errno
 import glob
 import gzip
 import hashlib
+from itertools import zip_longest
 import json
 import logging
 import multiprocessing as mp
@@ -341,15 +342,27 @@ def parse_fq_file_pair(args):
 	out2 = dnaio.open(out2_name, mode = 'w', fileformat = 'fastq')
 
 	with dnaio.open(r1_path, fileformat = 'fastq') as f1, dnaio.open(r2_path, fileformat = 'fastq') as f2:
-		for rec1, rec2 in zip(f1, f2):
+		for rec1, rec2 in zip_longest(f1, f2):
+			if rec1 is None or rec2 is None:
+				raise ValueError(
+					"Paired FASTQ files contain different numbers of records: "
+					f"{r1_path} and {r2_path}"
+				)
 			metrics.tot_reads += 1
 
 			info1 = rec1.name.strip()
+			info1_first_bit = info1.split(' ')[0]
 			seq1 = str(rec1.sequence)
 			plus1 = '+'
 			qual1 = rec1.qualities
 
 			info2 = rec2.name.strip()
+			info2_first_bit = info2.split(' ')[0]
+			if info1_first_bit != info2_first_bit:
+				raise ValueError(
+					"Paired FASTQ records have different read identifiers: "
+					f"{info1_first_bit!r} != {info2_first_bit!r}"
+				)
 			seq2 = str(rec2.sequence)
 			plus2 = '+'
 			qual2 = rec2.qualities
@@ -385,11 +398,6 @@ def parse_fq_file_pair(args):
 			if adapter_DNA in seq1 or adapter_DNA_rc in seq1 or adapter_DNA in seq2 or adapter_DNA_rc in seq2:
 				continue
 			metrics.no_adapter_read_count += 1
-
-
-			info1_first_bit = info1.split(' ')[0]
-			info2_first_bit = info2.split(' ')[0]
-
 
 
 			out1.write(dnaio.SequenceRecord(

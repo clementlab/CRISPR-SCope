@@ -88,9 +88,22 @@ class CRISPRSCopeAnnDataBuilder:
         mod_pct_df = self.editing_summary.reindex(columns=mod_pct_cols)
         counts_df = self.editing_summary.reindex(columns=counts_cols)
 
-        mod_pct_matrix = mod_pct_df.fillna(0).to_numpy(dtype=np.float32)
-        counts_matrix = counts_df.fillna(0).to_numpy(dtype=np.int32)
-        return {"X": mod_pct_matrix, "counts": counts_matrix}
+        numeric_mod_pct = mod_pct_df.apply(pd.to_numeric, errors="coerce")
+        numeric_counts = counts_df.apply(pd.to_numeric, errors="coerce")
+        observed = (
+            np.isfinite(numeric_mod_pct.to_numpy(dtype=np.float32))
+            & np.isfinite(numeric_counts.to_numpy(dtype=np.float32))
+            & (numeric_counts.to_numpy(dtype=np.float32) > 0)
+        )
+        # Keep the established zero-filled numeric matrices for AnnData while
+        # carrying observation status separately for genotype classification.
+        mod_pct_matrix = numeric_mod_pct.fillna(0).to_numpy(dtype=np.float32)
+        counts_matrix = numeric_counts.fillna(0).to_numpy(dtype=np.int32)
+        return {
+            "X": mod_pct_matrix,
+            "counts": counts_matrix,
+            "observed": observed,
+        }
 
     def _build_allele_layers_iteratively(self) -> Dict[str, np.ndarray]:
         shape = (self.n_obs, self.n_vars)
@@ -160,11 +173,15 @@ class CRISPRSCopeAnnDataBuilder:
             (second_allele_freq >= zyg_params["compound_het_min_allele2_pct"])
         )
 
-        zygosity_matrix = np.select(
+        called_zygosity = np.select(
             [cond_wt, cond_hom, cond_comp_het],
             [0, 2, 3],
             default=1,
         ).astype(np.int8)
+        zygosity_matrix = np.full(called_zygosity.shape, -1, dtype=np.int8)
+        zygosity_matrix[main_layers["observed"]] = called_zygosity[
+            main_layers["observed"]
+        ]
 
         adata = AnnData(X=main_layers["X"], obs=obs_df, var=var_df)
         adata.layers["counts"] = main_layers["counts"]

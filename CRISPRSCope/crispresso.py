@@ -4,6 +4,7 @@ from __future__ import annotations
 import errno
 import gzip
 import hashlib
+from itertools import zip_longest
 import json
 import logging
 import multiprocessing as mp
@@ -157,7 +158,19 @@ def _filter_to_hq_reads_at_single_amplicon(args):
 		 dnaio.open(out1_name, mode="w", fileformat="fastq") as writer1, \
 		 dnaio.open(out2_name, mode="w", fileformat="fastq") as writer2:
 
-		for rec1, rec2 in zip(reader1, reader2):
+		for rec1, rec2 in zip_longest(reader1, reader2):
+			if rec1 is None or rec2 is None:
+				raise ValueError(
+					"Amplicon %s: paired FASTQ files contain different numbers of records"
+					% amp
+				)
+			read_id1 = rec1.name.rsplit(":", 1)[0]
+			read_id2 = rec2.name.rsplit(":", 1)[0]
+			if read_id1 != read_id2:
+				raise ValueError(
+					"Amplicon %s: paired FASTQ read identifiers differ (%s != %s)"
+					% (amp, read_id1, read_id2)
+				)
 			barcode1 = rec1.name.split(":")[-1]
 			barcode2 = rec2.name.split(":")[-1]
 
@@ -1422,7 +1435,7 @@ def parse_one_crispresso_output(this_args):
 			if fastq_seq[-1*amp_arm_check_len:] in ok_right_sides:
 				known_amp_right = True
 
-			if not ok_left_sides or not ok_right_sides:
+			if not (known_amp_left and known_amp_right):
 				#print('mismatch: ' + fastq_seq[0:amp_arm_check_len] + ' with ' + str(ok_left_sides))
 				#print('mismatch: ' + fastq_seq[-1*amp_arm_check_len:] + ' with ' + str(ok_right_sides))
 				continue
@@ -1471,7 +1484,7 @@ def parse_one_crispresso_output(this_args):
 					data[cell][aln_ref]['unmod'] += 1
 				else:
 					data[cell]['mod'] += 1
-				data[cell][aln_ref]['mod'] += 1
+					data[cell][aln_ref]['mod'] += 1
 			allele_key = aln_ref + ":" + allele
 
 			if allele_key not in alleles[cell]:

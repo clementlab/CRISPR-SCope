@@ -1,9 +1,9 @@
 {
   "hashes": {
-    "amplicon_score": "88ff295575c088b24ebc2b2c10ef7765d37072617ef9c50a135af69b7493db0f",
-    "editing_rate_ci": "1b9dd81b61322f4af0961f9d0399bc4bafdc83922a8e8026ffa5f9663b334c39",
-    "editing_summary": "739f21d3e1092d4b6952a01d01b0fdbc6d0c3417f346700cf71cdd4cfe225ee7",
-    "unconditional_permutation": "50c8b66ff503cac4dad824cff3f77110d23c19ac26e19b482f34196a596b58cf",
+    "amplicon_score": "a0469793bd488dedcbd5caee9645cc90236206ae5c6f045d17e9af3a9b5cac45",
+    "editing_rate_ci": "aafbe0e4741f45776ea2fbd2628fdf61c323843062b550695be284081f5b1ff6",
+    "editing_summary": "f75d05433ee3bc3b909d85917edeaf8a8a68f0dc75a637729790c6ff30bff0f2",
+    "unconditional_permutation": "7cf80f07d80019d5f2c54934507cbc0eb2a897f7f7586d395c8515403b535582",
     "valid_amplicons": "adcc86e2fe46c30dd37def1794c852ae48edd8e7658d62cf37ebd669996c35d0"
   },
   "invariants": {
@@ -44,9 +44,9 @@
     "out_group_scored_cell_count": 48,
     "score_color_counts": {
       "HQ_HI": 16,
-      "HQ_LO": 16,
+      "HQ_LO": 12,
       "LQ_HI": 16,
-      "LQ_LO": 16
+      "LQ_LO": 20
     },
     "scored_cell_count": 64,
     "selected_pair_count": 23583
