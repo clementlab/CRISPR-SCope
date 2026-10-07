@@ -61,7 +61,7 @@ from .plots_and_report import (
     log_log_plot, make_report, mod_per_amp_filtered, plot_amp_score,
 )
 from .settings import (
-    _parse_amplicon_score_config, _parse_editing_rate_ci_config,
+    _parse_allele_calling_config, _parse_amplicon_score_config, _parse_editing_rate_ci_config,
     _parse_editing_rate_depth_stability_config, _parse_cache_config,
     _parse_settings_file, _resolve_settings_path, parse_settings,
 )
@@ -198,6 +198,7 @@ def _run_pipeline_unlocked(manifest_observer=None):
 		partial_rescue_min_mean_read_quality, write_output_manifest, settings_file
 		) = parse_settings(sys.argv)
 	amplicon_score_config = _parse_amplicon_score_config(settings_file)
+	min_reads_for_genotype, min_allele_support = _parse_allele_calling_config(settings_file)
 	editing_rate_ci_config = _parse_editing_rate_ci_config(settings_file)
 	editing_rate_depth_stability_config = _parse_editing_rate_depth_stability_config(settings_file)
 	cache_config = _parse_cache_config(settings_file)
@@ -287,12 +288,15 @@ def _run_pipeline_unlocked(manifest_observer=None):
 											  n_processes=n_processes,
 											  ignore_substitutions=ignore_substitutions,
 											  amplicon_score_config=amplicon_score_config,
+											  min_reads_per_amplicon_for_genotype=min_reads_for_genotype,
+											  min_allele_support=min_allele_support,
 											  cache_manager=cache_manager)
 	end_parse_crispresso = time.time() - start_parse_crispresso
 	logging.info(f"Parse CRISPResso Outputs: {end_parse_crispresso}")
 	mark_written(
 		"editing_summary",
 		"editing_summary_pseudobulk",
+		"allele_call_qc",
 		"amplicon_score",
 		"filtered_editing_summary_pseudobulk",
 	)

@@ -531,7 +531,12 @@ def test_parse_crispresso_cache_hit_skips_per_amplicon_parser(tmp_path, monkeypa
     assert manager.events[-1]["status"] == "hit"
 
 
-def test_parse_crispresso_setting_change_invalidates(tmp_path, monkeypatch):
+@pytest.mark.parametrize("setting_override", [
+    {"ignore_substitutions": True},
+    {"min_reads_per_amplicon_for_genotype": 6},
+    {"min_allele_support": 0.1},
+])
+def test_parse_crispresso_setting_change_invalidates(tmp_path, monkeypatch, setting_override):
     manager, output_root, amp_info, information = _seed_parse_crispresso_cache(tmp_path)
     monkeypatch.setattr(
         crispresso,
@@ -541,8 +546,8 @@ def test_parse_crispresso_setting_change_invalidates(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="reparse"):
         crispresso.parse_crispresso_outputs(
             ["ampA"], amp_info, str(tmp_path / "unused.tsv"), information,
-            output_root, 0, 0, 1, ignore_substitutions=True,
-            cache_manager=manager,
+            output_root, 0, 0, 1, cache_manager=manager,
+            **setting_override,
         )
     assert manager.events[-1]["status"] == "invalid"
 

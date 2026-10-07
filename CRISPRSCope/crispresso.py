@@ -50,6 +50,10 @@ from CRISPRSCope.cache import (
 from CRISPRSCope.io_utils import open_text_maybe_gzip
 from CRISPRSCope.output_artifacts import OutputContext, OutputManifest
 
+from .allele_calling import (
+	allele_status, annotation_fields, is_wildtype_key, local_quality,
+	median_read_minimum, parse_allele_support,
+)
 from .paths import (
 	STAGE_FILTER,
 	STAGE_SPLIT,
@@ -60,6 +64,10 @@ from .paths import (
 )
 from .settings import _build_input_ref_names, _normalize_optional_guide
 from .summaries import add_color_information, generate_amplicon_score
+
+ALLELE_CALLING_VERSION = 2
+MIN_READS_PER_AMPLICON_FOR_GENOTYPE_DEFAULT = 8
+MIN_ALLELE_SUPPORT_DEFAULT = 2
 
 def _filter_to_hq_reads_at_single_amplicon(args):
 	"""
@@ -1032,6 +1040,40 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					not_run_count += 1
 					continue
 
+				with gzip.open(amp_filename, "rb") as allele_input:
+					empty_allele_input = not allele_input.read(1)
+				if empty_allele_input:
+					skip_reason = "Skipped because allele FASTQ contains no reads after upstream filtering"
+					crispresso_information[amplicon_name]['status'] = 'Skipped'
+					crispresso_information[amplicon_name]['crispresso_command'] = 'NA'
+					crispresso_information[amplicon_name]['crispresso_result'] = skip_reason
+					crispresso_information[amplicon_name]['finished_file'] = 'NA'
+					crispresso_information[amplicon_name]['log_file'] = 'NA'
+					crispresso_information[amplicon_name]['crispresso_run_folder'] = 'NA'
+					logging.info("%s: %s", amplicon_name, skip_reason)
+					not_run_count += 1
+					safe_remove_owned(
+						finished_file, allowed_root=crispresso_dir,
+						expected_name=amplicon_name + ".finished",
+					)
+					safe_remove_owned(
+						os.path.join(crispresso_dir, "CRISPResso_on_" + amplicon_name),
+						allowed_root=crispresso_dir,
+						expected_name="CRISPResso_on_" + amplicon_name,
+					)
+					if cache_manager is not None:
+						skip_record = cache_manager.new_record(
+							"crispresso_filtered", amplicon_name, algorithm_version=2,
+							inputs={"allele_fastq": gzip_content_fingerprint(amp_filename)},
+							parameters={"mode": "filtered_alleles", "reason": "empty_input"},
+						)
+						if not cache_manager.evaluate(skip_record, ()).is_hit:
+							cache_manager.commit(
+								skip_record, (),
+								result={"status": "skipped", "reason": "empty_input"},
+							)
+					continue
+
 				crispresso_args = [
 					"CRISPResso",
 					"-r1", amp_filename,
@@ -1325,6 +1367,86 @@ def get_command_output(command):
 	return iter(p.stdout.readline, '')
 
 
+def _collect_tie_qualities(fastq_path, alleles, sequences, ok_left_sides, ok_right_sides, ignore_substitutions):
+	"""Re-read only tied allele groups, keeping read qualities out of the main count table."""
+	targets = defaultdict(set)
+	for cell, cell_alleles in alleles.items():
+		by_reference_and_count = defaultdict(list)
+		for key, count in cell_alleles.items():
+			by_reference_and_count[(key.partition(":")[0], count)].append(key)
+		for keys in by_reference_and_count.values():
+			if len(keys) > 1:
+				targets[cell].update(keys)
+		for key, sequence_counts in sequences[cell].items():
+			if len(sequence_counts) > 1:
+				maximum = max(sequence_counts.values())
+				if sum(count == maximum for count in sequence_counts.values()) > 1:
+					targets[cell].add(key)
+	if not targets:
+		return {}
+
+	records = defaultdict(lambda: defaultdict(list))
+	with open_text_maybe_gzip(fastq_path, "rt") as handle:
+		while True:
+			header = handle.readline()
+			if not header:
+				break
+			sequence = handle.readline().strip()
+			annotation = handle.readline().strip()
+			quality_line = handle.readline()
+			if not quality_line:
+				break
+			quality = quality_line.strip()
+			cell = header.split(" ", 1)[0].strip().split(":")[-1]
+			if cell not in targets or sequence[:30] not in ok_left_sides or sequence[-30:] not in ok_right_sides:
+				continue
+			fields = annotation_fields(annotation)
+			if fields is None or fields["ALN"] == "NA" or "&" in fields["ALN"]:
+				continue
+			status = allele_status(fields, ignore_substitutions)
+			if status is None:
+				continue
+			key = fields["ALN"] + ":" + status
+			if key in targets[cell]:
+				records[cell][key].append((sequence, local_quality(sequence, quality, fields, ignore_substitutions)))
+	return records
+
+
+def _rank_alleles_with_quality(cell_alleles, cell_records):
+	"""Rank by count, then local quality, WT preference, and stable key."""
+	groups = defaultdict(list)
+	for key, count in cell_alleles:
+		groups[count].append(key)
+	ranked = []
+	qualities = {}
+	resolutions = {}
+	for count in sorted(groups, reverse=True):
+		keys = groups[count]
+		if len(keys) == 1:
+			ranked.append((keys[0], count))
+			continue
+		mutant_sites = set()
+		for key in keys:
+			if not is_wildtype_key(key):
+				for _, record in cell_records.get(key, []):
+					if record is not None:
+						mutant_sites.update(record.event_sites)
+		for key in keys:
+			records = [record for _, record in cell_records.get(key, [])]
+			qualities[key] = median_read_minimum(
+				records, mutant_sites if is_wildtype_key(key) else None,
+			)
+		if all(qualities[key] is not None for key in keys):
+			ordered = sorted(keys, key=lambda key: (-qualities[key], not is_wildtype_key(key), key))
+		else:
+			ordered = sorted(keys, key=lambda key: (not is_wildtype_key(key), key))
+		ranked.extend((key, count) for key in ordered)
+		resolutions[count] = {
+			'quality_available': all(qualities[key] is not None for key in keys),
+		}
+	return ranked, qualities, resolutions
+
+
 def parse_one_crispresso_output(this_args):
 	"""
 		Parse a single CRISPResso2 output folder into per-cell allele summaries.
@@ -1347,11 +1469,10 @@ def parse_one_crispresso_output(this_args):
 			- crispresso_run_folder : str
 			- input_ref_allele_counts : str
 			- min_num_reads_per_cell : int
-			- min_allele_pct_cutoff : float
-			- min_allele_count_cutoff : int
+			- min_allele_support : int or float
+			- min_reads_per_amplicon_for_genotype : int
 			- ignore_substitutions : bool
 			- output_root : str
-			- min_reads_per_amplicon_per_cell : int
 
 	Returns
 	-------
@@ -1372,20 +1493,20 @@ def parse_one_crispresso_output(this_args):
 	crispresso_run_folder = this_args['crispresso_run_folder']
 	input_ref_allele_counts = this_args['input_ref_allele_counts']
 	min_num_reads_per_cell = this_args['min_num_reads_per_cell']
-	min_allele_pct_cutoff = this_args['min_allele_pct_cutoff']
-	min_allele_count_cutoff = this_args['min_allele_count_cutoff']
+	min_allele_support = parse_allele_support(this_args.get('min_allele_support', MIN_ALLELE_SUPPORT_DEFAULT))
+	for legacy in ('min_allele_pct_cutoff', 'min_allele_count_cutoff'):
+		if legacy in this_args:
+			raise ValueError(f'{legacy} is retired; use min_allele_support instead')
+	min_reads_for_genotype = int(this_args.get('min_reads_per_amplicon_for_genotype', MIN_READS_PER_AMPLICON_FOR_GENOTYPE_DEFAULT))
+	if min_reads_for_genotype < 0:
+		raise ValueError('min_reads_per_amplicon_for_genotype must be >= 0')
 	ignore_substitutions = this_args['ignore_substitutions']
 	amplicon_dir = os.path.join(this_args['output_root'] + ".seq_by_amplicon")
-	min_reads_per_amplicon_per_cell = this_args['min_reads_per_amplicon_per_cell']
 
 
 	folder_finished_file = crispresso_run_folder + ".summ.finished"
 	crispresso_output_fastq = os.path.join(crispresso_run_folder, 'CRISPResso_output.fastq.gz')
 	amp_arm_check_len = 30
-
-	wildtype_allele = get_wildtype_allele(crispresso_run_folder)
-
-
 
 	with open(amplicon_info_file,'r') as fin:
 		head = fin.readline().strip()
@@ -1407,8 +1528,6 @@ def parse_one_crispresso_output(this_args):
 	alleles = {}
 	allele_sequence_dict = {}
 	seen_refs = []
-	cell_read_counts = defaultdict(int)
-	num_crispresso_references = 0
 	num_references = len(input_ref_allele_counts.split(","))
 	logging.debug('Parsing CRISPResso output for ' + amplicon_name)
 	with open_text_maybe_gzip(crispresso_output_fastq,'rt') as fastq_input_handle:
@@ -1419,10 +1538,13 @@ def parse_one_crispresso_output(this_args):
 			fastq_seq = fastq_input_handle.readline().strip()
 			fastq_plus = fastq_input_handle.readline().strip()
 			fastq_qual = fastq_input_handle.readline()
+			if not fastq_qual:
+				raise ValueError('Truncated CRISPResso FASTQ record')
 			next_fastq_id = fastq_input_handle.readline()
 
 			tot_count += 1
-			if "ALN=NA " in fastq_plus: # Read did not align
+			fields = annotation_fields(fastq_plus)
+			if fields is None or fields['ALN'] == 'NA':
 				continue
 			crispresso2_aligned_count += 1
 			id_els = fastq_id.strip().split(":")
@@ -1440,13 +1562,12 @@ def parse_one_crispresso_output(this_args):
 				#print('mismatch: ' + fastq_seq[-1*amp_arm_check_len:] + ' with ' + str(ok_right_sides))
 				continue
 
-			aln_ref = ""
-			#match = re.search(" ALN=(\S+) ", fastq_plus)
-			match = re.search(r" ALN=(\S+) ", fastq_plus)
-			if match:
-				aln_ref = match.group(1)
+			aln_ref = fields['ALN']
 			#discard reads that align ambiguously
 			if '&' in aln_ref:
+				continue
+			allele = allele_status(fields, ignore_substitutions)
+			if allele is None:
 				continue
 
 			if cell not in data:
@@ -1460,31 +1581,12 @@ def parse_one_crispresso_output(this_args):
 					seen_refs.append(aln_ref)
 
 
-			allele = "NA"
-
-			# Formation of allele_key should only consider the quant window in the gRNA
-			if ignore_substitutions:
-				match = re.search("(DEL=.* INS=.*) SUB=.* ALN_REF", fastq_plus)
-				unmod_allele_str = "DEL= INS="
+			if allele in ('DEL= INS=', 'DEL= INS= SUB='):
+				data[cell]['unmod'] += 1
+				data[cell][aln_ref]['unmod'] += 1
 			else:
-				match = re.search("(DEL=.* INS=.* SUB=.*) ALN_REF", fastq_plus)
-				unmod_allele_str = "DEL= INS= SUB="
-
-			if match:
-				allele = match.group(1)
-
-				# Check for gRNA input
-				# if gRNA, where in the amplicon sequence?
-				# Check for allele key values outside of gRNA
-				# if outside of gRNA, convert to WT read
-				# We don't expect CRISPR edits outside of gRNA region
-
-				if allele == unmod_allele_str:
-					data[cell]['unmod'] += 1
-					data[cell][aln_ref]['unmod'] += 1
-				else:
-					data[cell]['mod'] += 1
-					data[cell][aln_ref]['mod'] += 1
+				data[cell]['mod'] += 1
+				data[cell][aln_ref]['mod'] += 1
 			allele_key = aln_ref + ":" + allele
 
 			if allele_key not in alleles[cell]:
@@ -1497,7 +1599,6 @@ def parse_one_crispresso_output(this_args):
 
 			alleles[cell][allele_key] += 1
 			allele_sequence_dict[cell][allele_key][fastq_seq] += 1
-			cell_read_counts[cell] += 1
 
 	# Checking for proper allele_sequence_dict formation
 
@@ -1528,6 +1629,10 @@ def parse_one_crispresso_output(this_args):
 		prob_array = [alleles_prob]*this_allele_count
 		prob_array.append(noise_prob)
 		input_ref_allele_probs.append(prob_array)
+	tie_records = _collect_tie_qualities(
+		crispresso_output_fastq, alleles, allele_sequence_dict,
+		ok_left_sides, ok_right_sides, ignore_substitutions,
+	)
 
 
 	#os.path.join(amplicon_dir, amplicon_name + "_unfiltered_allele.fq")
@@ -1543,7 +1648,7 @@ def parse_one_crispresso_output(this_args):
 	#print(f"Got here 2868\n{unfiltered_allele_file=}")
 
 	with open(crispresso_run_folder+".summ",'w') as fout, open(crispresso_run_folder+".summarize_indels.out",'w') as fsumm, open(crispresso_run_folder+".summarize_alleles.out",'w') as asumm, open(unfiltered_allele_file, "w") as aseq:
-		fout.write("\t".join([str(x) for x in ['cell','all_cell_read_count','all_cell_mut_pct','all_cell_allele_string','final_cell_read_count','final_cell_mut_allele_pct','final_cell_allele_string','final_num_refs_covered','final_cell_allele_mod_string','final_cell_allele_mod_types_string','final_cell_allele_readcount_string','final_ref_read_count_string','final_ref_mut_allele_fracs_string']])+"\n")
+		fout.write("\t".join([str(x) for x in ['cell','all_cell_read_count','all_cell_mut_pct','all_cell_allele_string','final_cell_read_count','final_cell_mut_allele_pct','final_cell_allele_string','final_num_refs_covered','final_cell_allele_mod_string','final_cell_allele_mod_types_string','final_cell_allele_readcount_string','final_ref_read_count_string','final_ref_mut_allele_fracs_string','call_status','count_tie','tie_resolution','selected_alleles_json','competing_alleles_json']])+"\n")
 
 
 		asumm.write("cell\tread_count\tmod_pct\t"+"\t".join(["allele_"+str(x) for x in range(tot_allele_count)]) + "\n")
@@ -1551,61 +1656,74 @@ def parse_one_crispresso_output(this_args):
 		for cell in sorted(data.keys()):
 			if cell.strip() == "":
 				continue
-			#logging.debug('cell is ' + cell + ' with ' + str(cell_read_counts[cell]) + ' reads')
 			mod_count = data[cell]['mod']
 			unmod_count = data[cell]['unmod']
 			all_cell_read_count = mod_count + unmod_count
 			all_cell_mut_pct = round(100*mod_count/float(all_cell_read_count),2)
 
 			final_alleles = []
+			selected_evidence = []
+			competing_evidence = []
+			tie_resolutions = []
+			count_tie = False
+			missing_reference_call = False
 			all_cell_alleles = sorted(alleles[cell].items(), key=lambda x:x[1],reverse=True)
 			for idx, this_allele_count in enumerate(input_ref_allele_counts):
 				this_allele_name = input_ref_names[idx] #reference name to look in CRISPResso output for
 				this_prob_array = input_ref_allele_probs[idx] #probability array to use for multinomial
-				this_cell_alleles = [x for x in alleles[cell].items() if x[0].split(":")[0] == this_allele_name] #alleles that match to this specific reference
-
-				this_cell_alleles = sorted(this_cell_alleles, key=lambda x:x[1],reverse=True)
-
-				this_cell_alleles_sum = sum([x[1] for x in this_cell_alleles])
-
-				# i is the number of alleles from the final_alleles to test as real. The rest are noise.
-				best_prob = None
+				this_cell_alleles = [x for x in alleles[cell].items() if x[0].partition(":")[0] == this_allele_name]
+				this_cell_alleles_sum = sum(count for _, count in this_cell_alleles)
+				eligible = [
+					item for item in this_cell_alleles
+					if min_allele_support.allows(item[1], all_cell_read_count)
+				]
+				if not eligible:
+					missing_reference_call = True
+					continue
+				eligible, qualities, resolutions = _rank_alleles_with_quality(
+					eligible, tie_records.get(cell, {}),
+				)
+				# Compare one through the expected copy count; unsupported reads stay in noise.
+				best_prob = float('-inf')
 				best_alleles = None
-				for i in range(1,this_allele_count+1):
-					# python indexing works in our favor here and will return nothing for accesses past the array length. e.g. d = [1,2]; d[0:5] = [1,2] and d[5:] = []
-					alleles_real = this_cell_alleles[0:i]
-					alleles_noise = this_cell_alleles[i:]
-
-					if len(alleles_real) == 0:
-						alleles_real = [('NA',0)]
-					#distribute the chosen alleles over the num_max_alleles
+				best_i = 0
+				for i in range(1, min(this_allele_count, len(eligible)) + 1):
+					alleles_real = eligible[:i].copy()
+					selected_keys = {key for key, _ in alleles_real}
+					alleles_noise_count = sum(
+						count for key, count in this_cell_alleles if key not in selected_keys
+					)
 					while len(alleles_real) < this_allele_count:
-#                        #print('beginning ' + str(alleles_real))
 						allele_to_halve = alleles_real.pop()
 						half_count = int(allele_to_halve[1]/2)
 						half_allele = (allele_to_halve[0],half_count)
 						half_allele_2 = (allele_to_halve[0],allele_to_halve[1]-half_count)
 						alleles_real = sorted(alleles_real+[half_allele,half_allele_2], key=lambda x:x[1],reverse=True)
-
-					alleles_real_counts = [x[1] for x in alleles_real]
-					alleles_noise_count = sum([x[1] for x in alleles_noise])
-
-					#this is the array of counts for the multinomial
-					prob_counts = alleles_real_counts + [alleles_noise_count]
-
-					this_prob = multinomial.pmf(prob_counts,this_cell_alleles_sum,this_prob_array)
-#                    print('pmf of ' + str(prob_counts) + ' cellall: ' + str(this_cell_alleles_sum) + ' prob array : ' + str(prob_array))
-#                    print('this prob: ' + str(this_prob))
-					if best_prob is None or this_prob > best_prob:
+					prob_counts = [count for _, count in alleles_real] + [alleles_noise_count]
+					this_prob = multinomial.logpmf(prob_counts, this_cell_alleles_sum, this_prob_array)
+					if this_prob > best_prob:
 						best_prob = this_prob
 						best_alleles = alleles_real
-
-
-
-				for best_allele in best_alleles:
-					final_alleles.append(best_allele)
-
-
+						best_i = i
+				if best_alleles is None:
+					missing_reference_call = True
+					continue
+				final_alleles.extend(best_alleles)
+				for key, count in eligible[:best_i]:
+					selected_evidence.append({'allele': key, 'reads': count, 'local_quality': qualities.get(key)})
+				for key, count in this_cell_alleles:
+					if key not in {item[0] for item in eligible[:best_i]}:
+						competing_evidence.append({'allele': key, 'reads': count, 'local_quality': qualities.get(key)})
+				if best_i < len(eligible) and eligible[best_i-1][1] == eligible[best_i][1]:
+					count_tie = True
+					selected_key = eligible[best_i-1][0]
+					competing_key = eligible[best_i][0]
+					if resolutions[eligible[best_i-1][1]]['quality_available'] and qualities[selected_key] != qualities[competing_key]:
+						tie_resolutions.append('quality')
+					else:
+						tie_resolutions.append('wildtype' if is_wildtype_key(selected_key) else 'stable_key')
+			if missing_reference_call:
+				final_alleles = []
 
 			#done performing reference-specific assignment
 
@@ -1629,14 +1747,14 @@ def parse_one_crispresso_output(this_args):
 			for idx,(allele,count) in enumerate(final_alleles):
 				# add final alleles to string
 				final_cell_read_count += count
-				allele_ref,allele_status = allele.split(":")
+				allele_ref,this_allele_status = allele.split(":", 1)
 				final_cell_allele_arr.append(allele)
 
 				final_ref_read_counts[allele_ref] += count
 				final_cell_allele_readcount_arr.append(str(count))
 				this_allele_mut_type_str = ""
 				if ignore_substitutions:
-					if allele_status == 'DEL= INS=':
+					if this_allele_status == 'DEL= INS=':
 						final_unmod_allele_count += 1
 						final_cell_allele_mod_arr.append("U")
 						final_ref_unmod_allele_counts[allele_ref] += 1
@@ -1645,13 +1763,13 @@ def parse_one_crispresso_output(this_args):
 						final_mod_allele_count += 1
 						final_cell_allele_mod_arr.append("M")
 						final_ref_mod_allele_counts[allele_ref] += 1
-						(del_str,ins_str) = [x.split("=")[1] for x in allele_status.split(" ")]
+						(del_str,ins_str) = [x.split("=")[1] for x in this_allele_status.split(" ")]
 						if del_str != '':
 							this_allele_mut_type_str += "D"
 						if ins_str != '':
 							this_allele_mut_type_str += "I"
 				else: #include substitutions
-					if allele_status == 'DEL= INS= SUB=':
+					if this_allele_status == 'DEL= INS= SUB=':
 						final_unmod_allele_count += 1
 						final_cell_allele_mod_arr.append("U")
 						final_ref_unmod_allele_counts[allele_ref] += 1
@@ -1660,7 +1778,7 @@ def parse_one_crispresso_output(this_args):
 						final_mod_allele_count += 1
 						final_cell_allele_mod_arr.append("M")
 						final_ref_mod_allele_counts[allele_ref] += 1
-						(del_str,ins_str,sub_str) = [x.split("=")[1] for x in allele_status.split(" ")]
+						(del_str,ins_str,sub_str) = [x.split("=")[1] for x in this_allele_status.split(" ")]
 						if del_str != '':
 							this_allele_mut_type_str += "D"
 						if ins_str != '':
@@ -1670,27 +1788,40 @@ def parse_one_crispresso_output(this_args):
 				final_cell_allele_mod_types_arr.append(this_allele_mut_type_str)
 
 
-			#if final_cell_read_count >= read_count_per_amplicon_cutoff:
-			#    write_max_alleles(allele_sequence_dict,
-			#                    cell,
-			#                    final_cell_allele_arr,
-			#                    amplicon_name,
-			#                    amplicon_dir,
-			#                    aseq,
-			#                    wildtype_allele)
-
-			#print(f"At line 2999: write_max_alleles: {aseq=}")
-			#asdf()
-			write_max_alleles(allele_sequence_dict, cell, final_cell_allele_arr, amplicon_name, amplicon_dir, aseq, wildtype_allele)
+			sequence_quality_scores = {}
+			for key in set(final_cell_allele_arr):
+				for sequence in allele_sequence_dict[cell][key]:
+					records = [
+						record for observed_sequence, record in tie_records.get(cell, {}).get(key, [])
+						if observed_sequence == sequence
+					]
+					sequence_quality_scores[(key, sequence)] = median_read_minimum(records)
+			if not missing_reference_call and all_cell_read_count >= min_reads_for_genotype:
+				write_max_alleles(
+					allele_sequence_dict, cell, final_cell_allele_arr, amplicon_name,
+					amplicon_dir, aseq, None, sequence_quality_scores,
+				)
 
 			final_cell_allele_string = ",".join(final_cell_allele_arr)
 			final_cell_allele_mod_string = ",".join(final_cell_allele_mod_arr)
 			final_cell_allele_mod_types_string = ",".join(final_cell_allele_mod_types_arr)
 			final_cell_allele_readcount_string = ",".join(final_cell_allele_readcount_arr)
-			final_cell_mut_allele_pct = round(100*final_mod_allele_count/float(final_mod_allele_count + final_unmod_allele_count),2)
+			call_status = (
+				'low_depth' if all_cell_read_count < min_reads_for_genotype else
+				'no_supported_allele' if missing_reference_call else 'called'
+			)
+			if call_status != 'called':
+				final_cell_allele_string = 'NA'
+				final_cell_allele_mod_string = 'NA'
+				final_cell_allele_mod_types_string = 'NA'
+				final_cell_allele_readcount_string = 'NA'
+			final_cell_mut_allele_pct = (
+				round(100*final_mod_allele_count/float(final_mod_allele_count + final_unmod_allele_count),2)
+				if call_status == 'called' else 'NA'
+			)
 
 			#now compute for each reference
-			final_num_refs_covered = len(final_ref_read_counts.keys())
+			final_num_refs_covered = len(final_ref_read_counts.keys()) if call_status == 'called' else 0
 			final_ref_mut_allele_fracs = ["NA"]*num_references
 			final_ref_read_count = [0]*num_references
 			for idx, this_ref_count in enumerate(input_ref_allele_counts):
@@ -1700,33 +1831,34 @@ def parse_one_crispresso_output(this_args):
 				this_ref_mod = final_ref_mod_allele_counts[this_ref_name]
 				this_ref_unmod = final_ref_unmod_allele_counts[this_ref_name]
 				this_ref_tot = this_ref_mod + this_ref_unmod
-				if this_ref_tot > 0:
+				if this_ref_tot > 0 and call_status == 'called':
 					final_ref_mut_allele_fracs[idx] = round(100*this_ref_mod/float(this_ref_tot),2)
 			final_ref_mut_allele_fracs_string = ",".join([str(x) for x in final_ref_mut_allele_fracs])
 			final_ref_read_count_string = ",".join([str(x) for x in final_ref_read_count])
 
 			# For each barcode, parse the allele dict and return the most sequence for the allele
-			fout.write("\t".join([str(x) for x in [cell,all_cell_read_count,all_cell_mut_pct,all_cell_allele_string,final_cell_read_count,final_cell_mut_allele_pct,final_cell_allele_string,final_num_refs_covered,final_cell_allele_mod_string,final_cell_allele_mod_types_string,final_cell_allele_readcount_string,final_ref_read_count_string,final_ref_mut_allele_fracs_string]])+"\n")
+			fout.write("\t".join([str(x) for x in [cell,all_cell_read_count,all_cell_mut_pct,all_cell_allele_string,final_cell_read_count,final_cell_mut_allele_pct,final_cell_allele_string,final_num_refs_covered,final_cell_allele_mod_string,final_cell_allele_mod_types_string,final_cell_allele_readcount_string,final_ref_read_count_string,final_ref_mut_allele_fracs_string,call_status,int(count_tie),','.join(sorted(set(tie_resolutions))) or 'none',json.dumps(selected_evidence, sort_keys=True),json.dumps(competing_evidence, sort_keys=True)]])+"\n")
 			if all_cell_read_count >= min_num_reads_per_cell:
 				fsumm.write("\t".join([str(x) for x in [cell,final_cell_read_count,final_cell_mut_allele_pct]])+"\n")
 
-				asumm.write("\t".join([str(x) for x in [cell,final_cell_read_count,final_cell_mut_allele_pct]+final_alleles])+"\n")
+				asumm.write("\t".join([str(x) for x in [cell,final_cell_read_count,final_cell_mut_allele_pct]+(final_alleles if call_status == 'called' else [])])+"\n")
 
 	with open (folder_finished_file,'w') as fout:
 		fout.write("Total reads\t" + str(tot_count)+"\n")
 		fout.write("CRISPResso2 aligned reads\t" + str(crispresso2_aligned_count)+"\n")
 		fout.write("Ignore substitutions\t" + str(bool(ignore_substitutions))+"\n")
+		fout.write("Allele calling version\t" + str(ALLELE_CALLING_VERSION)+"\n")
+		fout.write("Minimum genotype reads\t" + str(min_reads_for_genotype)+"\n")
+		fout.write("Minimum allele support\t" + min_allele_support.cache_value()+"\n")
 		fout.write(str(datetime.now()))
 
 
-def write_max_alleles(allele_dict, barcode, allele_key, amplicon_name, amplicon_folder, allele_file, wildtype_allele):
+def write_max_alleles(allele_dict, barcode, allele_key, amplicon_name, amplicon_folder, allele_file, wildtype_allele, sequence_quality_scores=None):
 	"""
 	 Write consensus allele sequences for a barcode to a FASTQ file.
 
-	For each allele key assigned to a barcode, selects the most common
-	sequence. In case of ties:
-		- If counts are 1 and wildtype allele is available, use wildtype.
-		- Otherwise select the highest-frequency sequence.
+	For each allele key, emit an observed sequence with highest read support.
+	Ties use local quality when available and then a stable sequence ordering.
 
 	Parameters
 	----------
@@ -1744,7 +1876,7 @@ def write_max_alleles(allele_dict, barcode, allele_key, amplicon_name, amplicon_
 	allele_file : file-like object
 		Open writable file handle for FASTQ output.
 	wildtype_allele : str or None
-		Wildtype allele sequence used for tie-breaking.
+		Retained for compatibility; never used to synthesize an allele.
 
 	Returns
 	-------
@@ -1756,61 +1888,20 @@ def write_max_alleles(allele_dict, barcode, allele_key, amplicon_name, amplicon_
 	- Does not return values; writes directly to `allele_file`.
 	- Assumes allele_dict structure created by parse_one_crispresso_output.
 	"""
-	# Return the most common sequence for the alleles for each barcode
-	allele_list = []
-	barcode_allele_key = []
-	adjusted_list = []
-
-
 	if isinstance(allele_key, str):
 		allele_key = [allele_key]
-
-
-	if len(allele_key) == 1:
-		allele_key.append(allele_key[0])
-
-	if len(allele_key) == 0:
-		return
-
-	for allele in allele_key:
-		adjusted = False
-		allele_df = pd.DataFrame(list(allele_dict[barcode][allele].items()), columns = ['FASTA', 'Count'])
-		max_value = allele_df['Count'].max()
-		max_loc = allele_df['Count'] == max_value
-		max_indices = allele_df.index[max_loc]
-		if sum(max_loc) > 1: # If there are ties
-			if max_value == 1: # If the tied values are 1, return the wildtype allele
-				if wildtype_allele is None: # Check if a wildtype allele was found
-					allele_sequence = allele_df.loc[max_indices[0], 'FASTA']
-				else:
-					allele_sequence = wildtype_allele
-					adjusted = True # add a flag to report when we adjust a cell to the WT allele
-
-			else: # If tied values are greater than 1, return the first one the path to the crispresso output for the amplicon
-				allele_sequence = allele_df.loc[allele_df['Count'].idxmax(), 'FASTA']
-		else: # There are no ties, choose highest frequency read
-			allele_sequence = allele_df.loc[max_indices[0], 'FASTA']
-
-		adjusted_list.append(adjusted)
-		allele_list.append(allele_sequence)
-		barcode_allele_key.append(allele)
-
-	headers = []
-	sequences = []
-	qualities = []
-
-
-	adjusted_list = ["Adjusted:" if x else "" for x in adjusted_list]
-
-	for index, allele_key in enumerate(barcode_allele_key):
-		headers.append(f"@{amplicon_name}:{adjusted_list[index]}{allele_key.replace(' ', '_')}:{barcode}:{index+1}")
-		sequences.append(allele_list[index])
-		qualities.append("a" * len(allele_list[index]))
-
-	for h,s,q in zip(headers, sequences, qualities):
-		allele_file.write(f"{h}\n{s}\n+\n{q}\n")
-
-	return
+	sequence_quality_scores = sequence_quality_scores or {}
+	for index, key in enumerate(allele_key, start=1):
+		sequence_counts = allele_dict[barcode][key]
+		maximum = max(sequence_counts.values())
+		candidates = [sequence for sequence, count in sequence_counts.items() if count == maximum]
+		if len(candidates) > 1 and all(sequence_quality_scores.get((key, sequence)) is not None for sequence in candidates):
+			candidates.sort(key=lambda sequence: (-sequence_quality_scores[(key, sequence)], sequence))
+		else:
+			candidates.sort()
+		sequence = candidates[0]
+		header = f"@{amplicon_name}:{key.replace(' ', '_')}:{barcode}:{index}"
+		allele_file.write(f"{header}\n{sequence}\n+\n{'a' * len(sequence)}\n")
 
 
 def get_wildtype_allele(crispresso_run_folder):
@@ -1847,21 +1938,27 @@ def get_wildtype_allele(crispresso_run_folder):
 	return max_allele
 
 
-def _parse_cache_matches_ignore_substitutions(folder_finished_file, ignore_substitutions):
+def _parse_cache_matches_ignore_substitutions(
+	folder_finished_file, ignore_substitutions,
+	min_reads_per_amplicon_for_genotype=MIN_READS_PER_AMPLICON_FOR_GENOTYPE_DEFAULT,
+	min_allele_support=MIN_ALLELE_SUPPORT_DEFAULT,
+):
 	if not os.path.isfile(folder_finished_file):
 		return False
 
-	expected_value = str(bool(ignore_substitutions))
-	observed_value = None
+	expected = {
+		'Ignore substitutions': str(bool(ignore_substitutions)),
+		'Allele calling version': str(ALLELE_CALLING_VERSION),
+		'Minimum genotype reads': str(min_reads_per_amplicon_for_genotype),
+		'Minimum allele support': parse_allele_support(min_allele_support).cache_value(),
+	}
+	observed = {}
 	with open(folder_finished_file, 'r') as fin:
 		for line in fin:
-			if line.startswith("Ignore substitutions\t"):
-				observed_value = line.rstrip("\n").split("\t", 1)[1]
-				break
-
-	if observed_value is None:
-		return False
-	return observed_value == expected_value
+			if '\t' in line:
+				key, value = line.rstrip('\n').split('\t', 1)
+				observed[key] = value
+	return all(observed.get(key) == value for key, value in expected.items())
 
 
 def _parse_crispresso_cache_requirements(output_root, amplicon_name, crispresso_run_folder):
@@ -1895,6 +1992,8 @@ def _parse_crispresso_cache_requirements(output_root, amplicon_name, crispresso_
 def _build_parse_crispresso_cache_record(
 	cache_manager, amplicon_name, amplicon_info, crispresso_run_folder,
 	ignore_substitutions, min_num_reads_per_cell,
+	min_reads_per_amplicon_for_genotype=MIN_READS_PER_AMPLICON_FOR_GENOTYPE_DEFAULT,
+	min_allele_support=MIN_ALLELE_SUPPORT_DEFAULT,
 ):
 	upstream = cache_manager.load("crispresso_reads", amplicon_name)
 	dependencies = [cache_manager.dependency(upstream)] if upstream is not None else []
@@ -1902,7 +2001,7 @@ def _build_parse_crispresso_cache_record(
 	return cache_manager.new_record(
 		"parse_crispresso",
 		amplicon_name,
-		algorithm_version=1,
+		algorithm_version=ALLELE_CALLING_VERSION,
 		dependencies=dependencies,
 		inputs={
 			"crispresso_fastq": large_file_fingerprint(crispresso_fastq),
@@ -1912,6 +2011,8 @@ def _build_parse_crispresso_cache_record(
 		parameters={
 			"ignore_substitutions": bool(ignore_substitutions),
 			"min_num_reads_per_cell": int(min_num_reads_per_cell),
+			"min_reads_per_amplicon_for_genotype": int(min_reads_per_amplicon_for_genotype),
+			"min_allele_support": parse_allele_support(min_allele_support).cache_value(),
 		},
 	)
 
@@ -1933,11 +2034,13 @@ def _parse_crispresso_output_with_status(this_args):
 
 def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_file,crispresso_information,
 								output_root, min_total_reads_per_barcode, min_reads_per_amplicon_per_cell, n_processes,num_max_alleles=2,num_references=1,
-								min_num_reads_per_cell=5,min_allele_pct_cutoff=.1,min_allele_count_cutoff=2,
+								min_num_reads_per_cell=5,min_allele_pct_cutoff=None,min_allele_count_cutoff=None,
 								ignore_substitutions=False,
 								write_alleles=False,
 								amplicon_score_config=None,
-								cache_manager=None):
+								cache_manager=None,
+								min_reads_per_amplicon_for_genotype=MIN_READS_PER_AMPLICON_FOR_GENOTYPE_DEFAULT,
+								min_allele_support=MIN_ALLELE_SUPPORT_DEFAULT):
 	"""
 	Generate and execute CRISPResso2 commands for each amplicon.
 
@@ -1987,6 +2090,12 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 		* `<output_root>.crispresso.filtered.info.txt` (allele mode)
 	- Skips amplicons with zero aligned reads.
 	"""
+	for legacy, value in (('min_allele_pct_cutoff', min_allele_pct_cutoff), ('min_allele_count_cutoff', min_allele_count_cutoff)):
+		if value is not None:
+			raise ValueError(f'{legacy} is retired; use min_allele_support instead')
+	if not isinstance(min_reads_per_amplicon_for_genotype, int) or min_reads_per_amplicon_for_genotype < 0:
+		raise ValueError('min_reads_per_amplicon_for_genotype must be a nonnegative integer')
+	min_allele_support = parse_allele_support(min_allele_support).value
 	parse_output_args = []
 	parse_cache_records = {}
 	parse_cache_requirements = {}
@@ -2003,6 +2112,7 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 					cache_manager, name, amplicon_information[name],
 					crispresso_run_folder, ignore_substitutions,
 					min_num_reads_per_cell,
+					min_reads_per_amplicon_for_genotype, min_allele_support,
 				)
 				requirements = _parse_crispresso_cache_requirements(
 					output_root, name, crispresso_run_folder
@@ -2011,23 +2121,25 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 				if not cache_hit:
 					parse_cache_records[name] = cache_record
 					parse_cache_requirements[name] = requirements
-			elif _parse_cache_matches_ignore_substitutions(folder_finished_file, ignore_substitutions):
+			elif _parse_cache_matches_ignore_substitutions(
+				folder_finished_file, ignore_substitutions,
+				min_reads_per_amplicon_for_genotype, min_allele_support,
+			):
 				cache_hit = True
 
 			if not cache_hit:
 				if os.path.isfile(folder_finished_file):
 					logging.info(
-						"Reparsing %s because ignore_substitutions changed to %s",
+						"Reparsing %s because allele-calling settings or parser version changed",
 						name,
-						ignore_substitutions,
 					)
 				this_args = {'amplicon_name':name,
 							 'amplicon_info_file':amplicon_info_file,
 							 'crispresso_run_folder':crispresso_run_folder,
 							 'input_ref_allele_counts':input_ref_allele_counts,
 							 'min_num_reads_per_cell':min_num_reads_per_cell,
-							 'min_allele_pct_cutoff':min_allele_pct_cutoff,
-							 'min_allele_count_cutoff':min_allele_count_cutoff,
+							 'min_allele_support':min_allele_support,
+							 'min_reads_per_amplicon_for_genotype':min_reads_per_amplicon_for_genotype,
 							 'ignore_substitutions':ignore_substitutions,
 							 'output_root': output_root,
 							 'write_alleles': write_alleles,
@@ -2101,14 +2213,16 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 		)
 	)
 	data = {}
+	qc_rows = []
 	for amplicon_name in usable_amplicon_names:
 		crispresso_run_folder = crispresso_information[amplicon_name]['crispresso_run_folder']
 		summ_file = crispresso_run_folder + ".summ"
 		with open (summ_file,'r') as fin:
-			head = fin.readline()
+			head = fin.readline().rstrip('\n').split('\t')
+			indices = {name: index for index, name in enumerate(head)}
 			for line in fin:
-				line_els = line.strip().split("\t")
-				if len(line_els) < 3:
+				line_els = line.rstrip('\n').split("\t")
+				if len(line_els) < 6:
 					raise Exception('Unexpected line format: ' + line + ' in ' + summ_file)
 				cell = line_els[0]
 				all_cell_read_count = line_els[1]
@@ -2121,11 +2235,24 @@ def parse_crispresso_outputs(amplicon_names,amplicon_information,amplicon_info_f
 				data[cell][amplicon_name]=(
 						"\t"+all_cell_read_count+"\t"+all_cell_mut_pct,
 						"\t"+final_cell_read_count+"\t"+final_cell_mut_pct)
+				qc_rows.append([
+					cell, amplicon_name, all_cell_read_count,
+					line_els[indices['call_status']] if 'call_status' in indices else 'legacy',
+					str(int(line_els[indices['call_status']] != 'called')) if 'call_status' in indices else '0',
+					line_els[indices['count_tie']] if 'count_tie' in indices else '0',
+					line_els[indices['tie_resolution']] if 'tie_resolution' in indices else 'unknown',
+					line_els[indices['selected_alleles_json']] if 'selected_alleles_json' in indices else '[]',
+					line_els[indices['competing_alleles_json']] if 'competing_alleles_json' in indices else '[]',
+				])
 
 
 	cells = sorted(data.keys())
 
 	outputs = OutputContext(output_root)
+	with open(outputs.path('allele_call_qc'), 'w') as fout:
+		fout.write('cell\tamplicon\taccepted_reads\tcall_status\tgenotype_withheld\tcount_tie\ttie_resolution\tselected_alleles_json\tcompeting_alleles_json\n')
+		for row in qc_rows:
+			fout.write('\t'.join(row) + '\n')
 	with open(outputs.path("editing_summary_pseudobulk"),'w') as fout:
 		header = "cell"
 		for name in amplicon_names:
@@ -2280,6 +2407,26 @@ def _load_final_allele_read_support(summ_file):
 	return read_support
 
 
+def _load_first_pass_call_status(summ_file):
+	"""Find first-pass no-calls so the second pass cannot revive them."""
+	statuses = {}
+	if not summ_file or not os.path.isfile(summ_file):
+		return statuses
+	with open(summ_file, 'r') as fin:
+		header = fin.readline().rstrip('\n').split('\t')
+		columns = {name: index for index, name in enumerate(header)}
+		if not {'cell', 'call_status', 'final_cell_read_count'} <= columns.keys():
+			return statuses
+		for line in fin:
+			values = line.rstrip('\n').split('\t')
+			if len(values) <= max(columns.values()):
+				continue
+			statuses[values[columns['cell']]] = (
+				values[columns['call_status']], values[columns['final_cell_read_count']],
+			)
+	return statuses
+
+
 def _parse_filtered_crispresso_allele_output(crispresso_output_fastq, read_support, valid_barcodes, ignore_substitutions=False):
 	"""
 	Aggregate filtered CRISPResso allele classifications by barcode.
@@ -2324,10 +2471,11 @@ def _parse_filtered_crispresso_allele_output(crispresso_output_fastq, read_suppo
 	return results
 
 
-def _write_filtered_summary_table(path, amplicon_names, cells, usable_amplicon_names, filtered_data):
+def _write_filtered_summary_table(path, amplicon_names, cells, usable_amplicon_names, filtered_data, first_pass_statuses=None):
 	"""
 	Write a filtered editing summary table with CRISPResso-derived genotype calls.
 	"""
+	first_pass_statuses = first_pass_statuses or {}
 	with open(path, "w") as fout:
 		header = "cell"
 		for name in amplicon_names:
@@ -2345,6 +2493,9 @@ def _write_filtered_summary_table(path, amplicon_names, cells, usable_amplicon_n
 					if this_data["total"] > 0:
 						mod_pct = round(100 * this_data["modified"] / float(this_data["total"]), 2)
 						val = "\t%s\t%s" % (this_data["support"], mod_pct)
+				status = first_pass_statuses.get(cell, {}).get(name)
+				if status is not None and status[0] != 'called':
+					val = "\t%s\tNA" % status[1]
 				line += val
 			fout.write(line + "\n")
 
@@ -2368,6 +2519,7 @@ def write_filtered_editing_summary_from_filtered_crispresso(
 	valid_barcodes = set(cells)
 
 	filtered_data = defaultdict(dict)
+	first_pass_statuses = defaultdict(dict)
 	usable_amplicon_names = []
 	for amplicon_name in amplicon_names:
 		filtered_info = crispresso_filtered_information.get(amplicon_name, {})
@@ -2382,6 +2534,8 @@ def write_filtered_editing_summary_from_filtered_crispresso(
 		first_pass_info = crispresso_information.get(amplicon_name, {})
 		first_pass_folder = first_pass_info.get("crispresso_run_folder")
 		first_pass_summ = first_pass_folder + ".summ" if first_pass_folder else None
+		for cell, status in _load_first_pass_call_status(first_pass_summ).items():
+			first_pass_statuses[cell][amplicon_name] = status
 		read_support = _load_final_allele_read_support(first_pass_summ)
 		amplicon_calls = _parse_filtered_crispresso_allele_output(
 			crispresso_output_fastq,
@@ -2398,6 +2552,7 @@ def write_filtered_editing_summary_from_filtered_crispresso(
 		cells,
 		set(usable_amplicon_names),
 		filtered_data,
+		first_pass_statuses,
 	)
 	logging.info("Finished writing filtered editing summary for %d filtered cells", len(cells))
 

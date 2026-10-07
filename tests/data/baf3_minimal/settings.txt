@@ -17,6 +17,8 @@ assign_reads_to_all_possible_amplicons	False
 suppress_sub_crispresso_plots	False
 min_total_reads_per_barcode	10
 min_reads_per_amplicon_per_cell	0
+min_reads_per_amplicon_for_genotype	8
+min_allele_support	2
 amplicon_score_min_reads_per_amplicon	5
 amplicon_score_min_covered_fraction	0.6666666666666666
 amplicon_score_max_barcode_rank	32

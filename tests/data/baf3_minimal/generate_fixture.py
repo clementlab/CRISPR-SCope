@@ -224,6 +224,7 @@ def write_settings(destination: Path) -> None:
                 "constant2\tGTACTCGCAGTAGTC",
                 "output_root\trun",
                 "processes\t1",
+                "cache_mode\tauto",
                 "allowBarcodeMismatches\tFalse",
                 "primer_lookup_len\t18",
                 "adapter_DNA\tTGTCTCTTATACACATCTCCGAGCCCACGAG",
@@ -233,6 +234,8 @@ def write_settings(destination: Path) -> None:
                 "suppress_sub_crispresso_plots\tFalse",
                 "min_total_reads_per_barcode\t10",
                 "min_reads_per_amplicon_per_cell\t0",
+                "min_reads_per_amplicon_for_genotype\t8",
+                "min_allele_support\t2",
                 "amplicon_score_min_reads_per_amplicon\t5",
                 "amplicon_score_min_covered_fraction\t0.6666666666666666",
                 f"amplicon_score_max_barcode_rank\t{FIXTURE_AMP_SCORE_MAX_BARCODE_RANK}",
@@ -249,6 +252,7 @@ def write_settings(destination: Path) -> None:
                 "editing_rate_ci_coverage_bin_width_reads\t5",
                 "write_editing_rate_depth_stability\tFalse",
                 "write_h5ad\tFalse",
+                "write_output_manifest\tFalse",
                 "",
             ]
         )
@@ -308,7 +312,11 @@ def build_fixture(destination: Path, source_run: Path, source_data: Path, overwr
 def record_golden(destination: Path, output_root: Path, overwrite: bool) -> dict:
     output_files = {
         "valid_amplicons": output_root.with_suffix(".splitReads.valid_amps.txt"),
+        "allele_call_qc": output_root.with_suffix(".alleleCallQC.txt"),
         "editing_summary": output_root.with_suffix(".editingSummary.txt"),
+        "editing_summary_pseudobulk": output_root.with_suffix(".editingSummaryPseudobulk.txt"),
+        "filtered_editing_summary": output_root.with_suffix(".filteredEditingSummary.txt"),
+        "filtered_editing_summary_pseudobulk": output_root.with_suffix(".filteredEditingSummaryPseudobulk.txt"),
         "amplicon_score": output_root.with_suffix(".amplicon_score.txt"),
         "editing_rate_ci": output_root.with_suffix(".editingRateConfidenceIntervals.txt"),
         "unconditional_permutation": output_root.with_suffix(".editingRateUnconditionalPermutation.txt"),
@@ -344,11 +352,10 @@ def record_golden(destination: Path, output_root: Path, overwrite: bool) -> dict
 
 
 def main(argv: list[str] | None = None) -> int:
-    source_run, source_data = source_defaults()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--destination", type=Path, default=FIXTURE_DIR)
-    parser.add_argument("--source-run", type=Path, default=source_run)
-    parser.add_argument("--source-data", type=Path, default=source_data)
+    parser.add_argument("--source-run", type=Path)
+    parser.add_argument("--source-data", type=Path)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--record-golden", type=Path, metavar="OUTPUT_ROOT")
     args = parser.parse_args(argv)
@@ -356,7 +363,13 @@ def main(argv: list[str] | None = None) -> int:
         golden = record_golden(args.destination, args.record_golden, args.overwrite)
         print(json.dumps(golden["invariants"], indent=2, sort_keys=True))
         return 0
-    manifest = build_fixture(args.destination, args.source_run, args.source_data, args.overwrite)
+    source_run, source_data = source_defaults()
+    manifest = build_fixture(
+        args.destination,
+        args.source_run or source_run,
+        args.source_data or source_data,
+        args.overwrite,
+    )
     print(json.dumps({"selected_pair_count": manifest["selected_pair_count"]}, indent=2))
     return 0
 

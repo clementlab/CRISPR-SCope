@@ -77,6 +77,7 @@ def test_baf3_minimal_fixture_matches_golden_baseline(tmp_path):
     }
     for key in (
         "valid_amplicons",
+        "allele_call_qc",
         "editing_summary",
         "filtered_editing_summary",
         "amplicon_score",
@@ -97,7 +98,11 @@ def test_baf3_minimal_fixture_matches_golden_baseline(tmp_path):
 
     output_files = {
         "valid_amplicons": output_root.with_suffix(".splitReads.valid_amps.txt"),
+        "allele_call_qc": output_root.with_suffix(".alleleCallQC.txt"),
         "editing_summary": output_root.with_suffix(".editingSummary.txt"),
+        "editing_summary_pseudobulk": output_root.with_suffix(".editingSummaryPseudobulk.txt"),
+        "filtered_editing_summary": output_root.with_suffix(".filteredEditingSummary.txt"),
+        "filtered_editing_summary_pseudobulk": output_root.with_suffix(".filteredEditingSummaryPseudobulk.txt"),
         "amplicon_score": output_root.with_suffix(".amplicon_score.txt"),
         "editing_rate_ci": output_root.with_suffix(".editingRateConfidenceIntervals.txt"),
         "unconditional_permutation": output_root.with_suffix(".editingRateUnconditionalPermutation.txt"),

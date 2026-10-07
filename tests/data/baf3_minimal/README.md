@@ -14,6 +14,9 @@ The mini Bowtie2 index contains only the 30 amplicon reference sequences and
 is valid only for this controlled fixture. CRISPResso sub-plots remain enabled
 because CRISPResso 2.3.3 fails after analysis when plot generation is suppressed
 alongside FASTQ output; these temporary plot files are not golden-checked.
+The fixture pins the cell-amplicon genotype depth to 8 reads and minimum allele
+support to 2 reads. Golden hashes include allele-call QC, genotype and
+pseudobulk summaries, amplicon scores, and editing-rate results.
 
 Regenerate from the workspace root with the project environment active:
 

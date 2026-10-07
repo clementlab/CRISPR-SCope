@@ -150,6 +150,8 @@ assign_reads_to_all_possible_amplicons	False
 suppress_sub_crispresso_plots	False
 min_total_reads_per_barcode	10
 min_reads_per_amplicon_per_cell	0
+min_reads_per_amplicon_for_genotype	8
+min_allele_support	2
 amplicon_score_min_reads_per_amplicon	5
 amplicon_score_min_covered_fraction	0.6666666666666666
 amplicon_score_max_barcode_rank	10000
@@ -248,6 +250,8 @@ You may also use `genome` instead of `bowtie2_index`; internally the pipeline re
 | `alt_alleles_file` | not used | Optional alternate allele definition file. |
 | `min_total_reads_per_barcode` | `10` | Minimum total reads required for a barcode to be considered downstream. |
 | `min_reads_per_amplicon_per_cell` | `0` | Optional stricter gate requiring this many reads at every usable amplicon before a barcode is scored; it also sets per-amplicon eligibility in editing-rate analyses. |
+| `min_reads_per_amplicon_for_genotype` | `8` | Minimum accepted reads at one cell–amplicon for a genotype. Below this depth, genotype `modPct` is `NA` without removing the cell or its read evidence. |
+| `min_allele_support` | `2` | A whole number sets minimum reads for a candidate allele (`2`); decimal syntax sets a fraction of accepted reads at that cell–amplicon (`0.1` means 10%). Only one mode applies. The unused `min_allele_count_cutoff` and `min_allele_pct_cutoff` names are retired. |
 | `amplicon_score_min_reads_per_amplicon` | `5` | Reads required for an amplicon to count as supported in the breadth score; must be at least 1. |
 | `amplicon_score_min_covered_fraction` | `0.6666666666666666` | Fraction of usable amplicons that must be supported for a high score; must be greater than 0 and no greater than 1. |
 | `amplicon_score_max_barcode_rank` | `10000` | Largest total-read barcode rank classified as high depth; must be at least 1. |
@@ -292,6 +296,8 @@ changed scoring settings cannot silently reuse stale classifications.
 ### Editing-Rate Confidence Intervals
 
 By default, CRISPRSCope resamples cells with replacement and computes pointwise percentile-bootstrap intervals for the percentage of cells with at least one edited allele. In non-pseudobulk `editingSummary.txt`, `modPct` is a categorical genotype encoding: `0` (WT/WT) is unedited and `50` (WT/Mut) or `100` (Mut/Mut) is edited. Missing calls are excluded independently for each amplicon, as are calls below `min_reads_per_amplicon_per_cell`; any other finite `modPct` value is rejected.
+
+Allele calls use a multinomial model with a fixed 1% combined noise category and the expected copy count for each reference. Genotype depth counts only reads with an unambiguous reference alignment, matching amplicon arms, and parsable edit annotation. Read-count ties at the selection boundary use the median of each supporting read's lowest Phred quality near its annotated quantification-window edit; unresolved ties prefer WT, then a stable allele ordering. The `alleleCallQC.txt` table records accepted depth, selected and competing allele support, tie resolution, and whether a genotype was withheld. Indel-flank Phred quality is a tie breaker, not an alignment-confidence estimate. Raw-read pseudobulk `modPct` remains available when genotype `modPct` is `NA`. The defaults of 8 reads and 2 allele-supporting reads are guard rails, not biologically validated thresholds; compare 6 versus 8 reads on a representative dataset before manuscript use.
 
 The output reports estimates for each amplicon from:
 
@@ -343,6 +349,7 @@ results/demo_run.seq_by_amplicon/
 results/demo_run.crispresso/
 results/demo_run.crispresso.filtered/
 results/demo_run.amplicon_score.txt
+results/demo_run.alleleCallQC.txt
 results/demo_run.filteredEditingSummary.txt
 results/demo_run.filteredEditingSummaryPseudobulk.txt
 results/demo_run.editingRateConfidenceIntervals.txt

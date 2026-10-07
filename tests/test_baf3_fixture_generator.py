@@ -92,3 +92,9 @@ def test_barcode_halves_emits_unique_nine_base_whitelist_entries():
         "CCCCCCCCC",
         "GGGGGGGGG",
     ]
+
+
+def test_tracked_settings_match_fixture_generator(tmp_path):
+    generated = tmp_path / "settings.txt"
+    fixture_generator.write_settings(generated)
+    assert generated.read_text() == (GENERATOR_PATH.parent / "settings.txt").read_text()

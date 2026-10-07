@@ -105,7 +105,7 @@ class CRISPRSCopeAnnDataBuilder:
             "observed": observed,
         }
 
-    def _build_allele_layers_iteratively(self) -> Dict[str, np.ndarray]:
+    def _build_allele_layers_iteratively(self, observed: np.ndarray) -> Dict[str, np.ndarray]:
         shape = (self.n_obs, self.n_vars)
         allele_layers = {
             "allele_seq_1": np.full(shape, "", dtype=object),
@@ -131,7 +131,7 @@ class CRISPRSCopeAnnDataBuilder:
             for (cell_bc, amp_name), group in df.groupby(["cell_barcode", "amplicon_name"], observed=True):
                 row_idx = self._cell_map.get(str(cell_bc))
                 col_idx = self._amp_map.get(str(amp_name))
-                if row_idx is None or col_idx is None:
+                if row_idx is None or col_idx is None or not observed[row_idx, col_idx]:
                     continue
 
                 top1 = group.iloc[0]
@@ -158,7 +158,7 @@ class CRISPRSCopeAnnDataBuilder:
         obs_df = self._build_obs()
         var_df = self._build_var()
         main_layers = self._build_main_layers()
-        allele_layers = self._build_allele_layers_iteratively()
+        allele_layers = self._build_allele_layers_iteratively(main_layers["observed"])
 
         zyg_params = self.config["analysis_parameters"]["zygosity"]
         mod_pct_matrix = main_layers["X"]

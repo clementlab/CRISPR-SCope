@@ -1,9 +1,13 @@
 {
   "hashes": {
+    "allele_call_qc": "3de126dfa2754b1c504637f25bf8254ff3f2d1e7fb9a6264a1484dfb1c0ecd13",
     "amplicon_score": "a0469793bd488dedcbd5caee9645cc90236206ae5c6f045d17e9af3a9b5cac45",
-    "editing_rate_ci": "aafbe0e4741f45776ea2fbd2628fdf61c323843062b550695be284081f5b1ff6",
-    "editing_summary": "f75d05433ee3bc3b909d85917edeaf8a8a68f0dc75a637729790c6ff30bff0f2",
-    "unconditional_permutation": "7cf80f07d80019d5f2c54934507cbc0eb2a897f7f7586d395c8515403b535582",
+    "editing_rate_ci": "55cdc020aa199990aef941143c2b6243efbda3eda8864582ceb3064ddf89f887",
+    "editing_summary": "520f5c7eb44ded3b16a3e04258a37329aeb9d398ba631bee0a7c63f0815c716f",
+    "editing_summary_pseudobulk": "6e894ad8c382e2b6e09e6bd19338d9209bd3a0d64ceddc06dfc1f4713633c665",
+    "filtered_editing_summary": "539c029f789e231aa9119072382fa51c301972482a9a6a69537e7190f7d93462",
+    "filtered_editing_summary_pseudobulk": "6e894ad8c382e2b6e09e6bd19338d9209bd3a0d64ceddc06dfc1f4713633c665",
+    "unconditional_permutation": "a0341ef2b7f0daccc5f8ec7ffbb0599169e5f73ab735f067100c8887dcd77fcd",
     "valid_amplicons": "adcc86e2fe46c30dd37def1794c852ae48edd8e7658d62cf37ebd669996c35d0"
   },
   "invariants": {

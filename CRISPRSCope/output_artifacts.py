@@ -54,6 +54,7 @@ ARTIFACT_SPECS: tuple[OutputSpec, ...] = (
     OutputSpec("filtered_editing_summary", ".filteredEditingSummary.txt", "table"),
     OutputSpec("editing_summary_pseudobulk", ".editingSummaryPseudobulk.txt", "table"),
     OutputSpec("filtered_editing_summary_pseudobulk", ".filteredEditingSummaryPseudobulk.txt", "table"),
+    OutputSpec("allele_call_qc", ".alleleCallQC.txt", "table"),
     OutputSpec("amplicon_score", ".amplicon_score.txt", "table"),
     OutputSpec("valid_amplicons", ".splitReads.valid_amps.txt", "table"),
     OutputSpec("aligned_read_counts", ".splitReads.aligned.txt", "table"),

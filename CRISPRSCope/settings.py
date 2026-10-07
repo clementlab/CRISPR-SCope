@@ -41,6 +41,7 @@ from CRISPRSCope import __version__
 from CRISPRSCope.cache import CacheConfig, tool_identity
 from CRISPRSCope.io_utils import open_text_maybe_gzip
 from CRISPRSCope.output_artifacts import OutputContext, OutputManifest
+from .allele_calling import parse_allele_support
 
 MIN_TOTAL_READS_PER_BARCODE_DEFAULT = 10
 MIN_READS_PER_AMPLICON_PER_CELL_DEFAULT = 0
@@ -164,6 +165,17 @@ def _parse_amplicon_score_config(settings_file):
 		min_covered_fraction=min_covered_fraction,
 		max_barcode_rank=max_barcode_rank,
 	)
+
+
+def _parse_allele_calling_config(settings_file):
+	"""Return the genotype depth and the typed allele support threshold."""
+	settings = _parse_settings_file(settings_file)
+	for legacy in ('min_allele_pct_cutoff', 'min_allele_count_cutoff'):
+		if legacy in settings:
+			raise ValueError(f"{legacy} was unused and is retired; use min_allele_support instead")
+	depth = _parse_int_setting(settings, 'min_reads_per_amplicon_for_genotype', 8, minimum=0)
+	support = parse_allele_support(settings.get('min_allele_support', '2'))
+	return depth, support.value
 
 
 def _parse_editing_rate_ci_config(settings_file):
@@ -425,6 +437,7 @@ def parse_settings(args):
 
 	# Parse the settings file and write to a dictionary {key '\t' value}
 	settings = _parse_settings_file(settings_file)
+	_parse_allele_calling_config(settings_file)
 
 	# Checking for various required settings and raising exceptions for missing values
 	if 'r1' not in settings:

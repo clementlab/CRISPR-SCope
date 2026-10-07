@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 import CRISPRSCope.cli as cli
+from CRISPRSCope.cache import CacheManager
 from CRISPRSCope.h5ad.loaders import _parse_and_write_parquet
 from CRISPRSCope.cli import (
     generate_amplicon_score,
@@ -25,7 +26,10 @@ def test_parse_crispresso_outputs_preserves_failed_amplicons_as_na(tmp_path):
         "cellA	12	25.0	NA	10	20.0	NA	1	M	D	10	10	20.0\n"
     )
     finished_marker = completed_run_folder.with_suffix(completed_run_folder.suffix + ".summ.finished")
-    finished_marker.write_text("Ignore substitutions\tFalse\n")
+    finished_marker.write_text(
+        "Ignore substitutions\tFalse\nAllele calling version\t2\n"
+        "Minimum genotype reads\t8\nMinimum allele support\tcount:2\n"
+    )
 
     amplicon_information = {
         "amp_ok": {"input_ref_allele_counts": "1"},
@@ -238,6 +242,43 @@ def test_filtered_crispresso_cache_reuses_matching_input_hash(tmp_path):
 
     assert result["ampA"]["input_sha256"] == input_hash
     assert run_folder.exists()
+
+
+def test_filtered_crispresso_skips_empty_allele_fastq_and_caches_skip(tmp_path, monkeypatch):
+    output_root = str(tmp_path / "run")
+    allele_input = cli._filtered_allele_fastq_path(output_root, "ampA")
+    cli.os.makedirs(cli.os.path.dirname(allele_input), exist_ok=True)
+    with gzip.open(allele_input, "wt"):
+        pass
+
+    filtered_dir = tmp_path / "run.crispresso.filtered"
+    stale_folder, stale_finished = _write_completed_crispresso_output(filtered_dir)
+    monkeypatch.setattr(
+        cli.mp, "Pool",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("CRISPResso should not run")),
+    )
+    manager = CacheManager(output_root)
+    inputs = _make_crispresso_inputs(tmp_path)
+
+    result = run_crispresso_commands(
+        ["ampA"], inputs, output_root, str(tmp_path / "run.crispresso"),
+        False, 1, alleles=True, cache_manager=manager,
+    )
+
+    assert result["ampA"]["status"] == "Skipped"
+    assert "contains no reads" in result["ampA"]["crispresso_result"]
+    assert not stale_folder.exists()
+    assert not stale_finished.exists()
+    assert manager.load("crispresso_filtered", "ampA").result == {
+        "status": "skipped", "reason": "empty_input",
+    }
+
+    result = run_crispresso_commands(
+        ["ampA"], inputs, output_root, str(tmp_path / "run.crispresso"),
+        False, 1, alleles=True, cache_manager=manager,
+    )
+    assert result["ampA"]["status"] == "Skipped"
+    assert manager.events[-1]["status"] == "hit"
 
 
 def test_filtered_crispresso_cache_reruns_changed_input(tmp_path, monkeypatch):
