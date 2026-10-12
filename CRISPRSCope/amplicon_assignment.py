@@ -675,7 +675,7 @@ def split_reads_by_amplicon(aligned_bam, output_root,amplicon_file,alt_alleles_f
 			if len(line_els) > 2:
 				guide_seq = line_els[2]
 			input_ref_allele_counts = "2"
-			if len(line_els) > 3:
+			if len(line_els) > 3 and line_els[3].strip():
 				input_ref_allele_counts = line_els[3]
 
 			amplicon_information[amp_name] = {

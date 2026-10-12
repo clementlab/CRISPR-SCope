@@ -199,12 +199,29 @@ Optional columns currently supported by the pipeline are:
 
 3. guide sequence
 4. reference allele count
+5. guide match mode (`exact` or `flexible`; optional, defaults to `exact`)
 
 ```tsv
 AMP_TARGET_1	ACTGACTGACTGACTGACTGACTGACTGACTGACTGACTG	GGACTGACTGACTGACTGA	2
 AMP_TARGET_2	TGACCTGATCGATCGTAGCTAGCTAGCTAGCATCGATCGA	CTGATCGATCGTAGCTAGC	2
 AMP_TARGET_3	GGCTAACCGGTTAACCGGTTAACCGGTTAACTGACTGACT	ACCGGTTAACCGGTTAACT	2
 ```
+
+Use `flexible` in column 5 for an off-target amplicon whose guide is expected
+to differ from the reference sequence. CRISPR-SCope checks guides before
+processing reads. An `exact` guide absent from every reference sequence (on
+either strand) stops the run with an amplicon-specific error. In `flexible`
+mode, exact guides use CRISPResso2 `-g`; mismatched guides that exceed
+`flexiguide_homology` use `--flexiguide_seq`. Guides below the threshold are
+omitted with a warning. If no guides remain, CRISPResso2 quantifies across the
+whole amplicon. One mode applies to every comma-separated guide in a row.
+
+`flexiguide_homology` is an optional settings-file integer from 0 to 100,
+defaulting to the installed CRISPResso2 threshold of `80`. It is CRISPResso2's
+alignment score threshold, not a percent-identity cutoff. In this installed
+version, the flexible-match score must be strictly greater than the threshold.
+To use column 5 while leaving the reference allele count at its default, leave
+column 4 blank but retain its tab separator.
 
 ### Example Alternate Alleles File
 

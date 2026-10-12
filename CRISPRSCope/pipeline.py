@@ -49,6 +49,7 @@ from .crispresso import (
     write_filtered_editing_summary_from_filtered_crispresso,
 )
 from .fastq_processing import parse_and_align_reads
+from .guide_matching import validate_guides
 from .editing_rate_outputs import (
     write_editing_rate_ci_output,
     write_editing_rate_depth_stability_output,
@@ -63,7 +64,7 @@ from .plots_and_report import (
 from .settings import (
     _parse_allele_calling_config, _parse_amplicon_score_config, _parse_editing_rate_ci_config,
     _parse_editing_rate_depth_stability_config, _parse_cache_config,
-    _parse_settings_file, _resolve_settings_path, parse_settings,
+    _parse_flexiguide_homology, _parse_settings_file, _resolve_settings_path, parse_settings,
 )
 
 def _require_selected_barcodes(parsed_information, cell_quality_to_analyze):
@@ -202,6 +203,9 @@ def _run_pipeline_unlocked(manifest_observer=None):
 	editing_rate_ci_config = _parse_editing_rate_ci_config(settings_file)
 	editing_rate_depth_stability_config = _parse_editing_rate_depth_stability_config(settings_file)
 	cache_config = _parse_cache_config(settings_file)
+	guide_resolutions = validate_guides(
+		amplicon_file, alt_alleles_file, _parse_flexiguide_homology(settings_file)
+	)
 	end_settings = time.time() - start_settings
 	#print(f"Parse Settings: {end_settings}")
 
@@ -259,6 +263,8 @@ def _run_pipeline_unlocked(manifest_observer=None):
 		manifest.set_stage("split_reads_by_amplicon")
 	start_split_reads = time.time()
 	amplicon_names, amplicon_information, amplicon_info_file = split_reads_by_amplicon(aligned_bam, output_root, amplicon_file, alt_alleles_file, primer_lookup_len, amp_file_dir, bowtie2_index, adapter_DNA, n_processes, keep_intermediate_files, reads_per_cell, min_total_reads_per_barcode, assign_reads_to_all_possible_amplicons, debug_rescued_reads_bam, debug_require_strict_amplicon_alignment, debug_rejected_rescue_reads_bam, partial_rescue_min_mean_read_quality, cache_manager=cache_manager)
+	for amplicon_name in amplicon_names:
+		amplicon_information[amplicon_name]['guide_resolution'] = guide_resolutions[amplicon_name]
 	prune_removed_amplicon_caches(
 		cache_manager, amplicon_names, output_root, crispresso_dir,
 	)

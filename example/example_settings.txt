@@ -1,5 +1,6 @@
 # Example settings file for CRISPRSCope.
 # Each non-comment line must be key<TAB>value.
+# Optional: flexiguide_homology<TAB>80 (CRISPResso2 alignment score threshold).
 
 r1	data/sample1_L1_r1.fq,data/sample1_L2_r1.fq
 r2	data/sample1_L1_r2.fq,data/sample1_L2_r2.fq
@@ -11,6 +12,7 @@ constant1	GTACGTACGAGTC
 constant2	GTACTCGCAGTAGTC
 processes	10
 cache_mode	auto
+flexiguide_homology	80
 primer_lookup_len	18
 adapter_DNA	TGTCTCTTATACACATCTCCGAGCCCACGAG
 allowBarcodeMismatches	False

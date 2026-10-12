@@ -54,6 +54,7 @@ from .allele_calling import (
 	allele_status, annotation_fields, is_wildtype_key, local_quality,
 	median_read_minimum, parse_allele_support,
 )
+from .guide_matching import FLEXIGUIDE_HOMOLOGY_DEFAULT
 from .paths import (
 	STAGE_FILTER,
 	STAGE_SPLIT,
@@ -837,12 +838,16 @@ def _build_crispresso_cache_record(
 	return cache_manager.new_record(
 		stage,
 		amplicon_name,
-		algorithm_version=1,
+		algorithm_version=2,
 		dependencies=dependencies,
 		inputs={
 			"fastqs": [gzip_content_fingerprint(path) for path in input_paths],
 			"amplicon_sequences": amplicon_info["amp_seqs"],
 			"guide_sequence": _normalize_optional_guide(amplicon_info.get("guide_seq", "")),
+			"guide_resolution": (
+				vars(amplicon_info["guide_resolution"])
+				if "guide_resolution" in amplicon_info else None
+			),
 		},
 		parameters={
 			"mode": "filtered_alleles" if alleles else "reads",
@@ -1020,6 +1025,10 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 
 			amplicon_seqs = amplicon_information[amplicon_name]['amp_seqs']
 			guide = _normalize_optional_guide(amplicon_information[amplicon_name].get('guide_seq', ''))
+			resolution = amplicon_information[amplicon_name].get('guide_resolution')
+			exact_guides = ','.join(resolution.exact) if resolution else guide
+			flexible_guides = ','.join(resolution.flexible) if resolution else ''
+			flexiguide_homology = resolution.homology if resolution else FLEXIGUIDE_HOMOLOGY_DEFAULT
 
 
 			# Separate crispresso_cmd for alleles and non alleles
@@ -1079,8 +1088,6 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					"-r1", amp_filename,
 					"-a", amplicon_seqs,
 				]
-				if guide:
-					crispresso_args.extend(["-g", guide])
 
 			else:
 				missing_inputs = []
@@ -1105,8 +1112,11 @@ def run_crispresso_commands(amplicon_names,amplicon_information,output_root,cris
 					"-r2", amp_filename_r2,
 					"-a", amplicon_seqs,
 				]
-				if guide:
-					crispresso_args.extend(["-g", guide])
+			if exact_guides:
+				crispresso_args.extend(["-g", exact_guides])
+			if flexible_guides:
+				crispresso_args.extend(["--flexiguide_seq", flexible_guides,
+					"--flexiguide_homology", str(flexiguide_homology)])
 
 			if suppress_sub_crispresso_plots:
 				crispresso_args.extend(["--suppress_report", "--suppress_plots"])

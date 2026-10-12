@@ -42,6 +42,7 @@ from CRISPRSCope.cache import CacheConfig, tool_identity
 from CRISPRSCope.io_utils import open_text_maybe_gzip
 from CRISPRSCope.output_artifacts import OutputContext, OutputManifest
 from .allele_calling import parse_allele_support
+from .guide_matching import FLEXIGUIDE_HOMOLOGY_DEFAULT
 
 MIN_TOTAL_READS_PER_BARCODE_DEFAULT = 10
 MIN_READS_PER_AMPLICON_PER_CELL_DEFAULT = 0
@@ -83,6 +84,14 @@ def _parse_cache_config(settings_file):
 	"""Parse the cache policy without changing the legacy settings tuple."""
 	settings = _parse_settings_file(settings_file)
 	return CacheConfig.from_value(settings.get("cache_mode", "auto"))
+
+
+def _parse_flexiguide_homology(settings_file):
+	settings = _parse_settings_file(settings_file)
+	value = _parse_int_setting(settings, "flexiguide_homology", FLEXIGUIDE_HOMOLOGY_DEFAULT)
+	if not 0 <= value <= 100:
+		raise ValueError("flexiguide_homology must be between 0 and 100")
+	return value
 
 
 def _resolve_settings_path(path_value: str, settings_dir: str) -> str:
@@ -438,6 +447,7 @@ def parse_settings(args):
 	# Parse the settings file and write to a dictionary {key '\t' value}
 	settings = _parse_settings_file(settings_file)
 	_parse_allele_calling_config(settings_file)
+	_parse_flexiguide_homology(settings_file)
 
 	# Checking for various required settings and raising exceptions for missing values
 	if 'r1' not in settings:
